@@ -9,6 +9,13 @@ import os
 import argparse
 from PyQt5.QtWidgets import QApplication
 
+# Add path resolution for package imports
+script_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(script_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+# Now we can import modules from the package
 from toggleman.core.config import ConfigManager
 from toggleman.core.debug import setup_logging, get_logger
 from toggleman.gui.main_window import MainWindow
