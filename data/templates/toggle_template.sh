@@ -1,0 +1,414 @@
+#!/bin/bash
+# Generated Toggle Script by Toggleman
+# Do not edit directly - use Toggleman to modify this script
+
+# Configuration
+readonly APP_COMMAND="${APP_COMMAND}"
+readonly APP_PROCESS="${APP_PROCESS}"
+readonly WINDOW_CLASS="${WINDOW_CLASS}"
+readonly CHROME_EXEC="${CHROME_EXEC}"
+readonly CHROME_PROFILE="${CHROME_PROFILE}"
+readonly APP_ID="${APP_ID}"
+readonly TRAY_ICON_PATH="${TRAY_ICON_PATH}"
+readonly TRAY_NAME="${TRAY_NAME}"
+readonly TRAY_ICON_DIR="$HOME/.cache/toggle_app"
+
+# Debug settings
+DEBUG="${DEBUG}"
+NOTIFICATIONS="${NOTIFICATIONS}"
+
+# Error codes
+readonly E_GENERAL=1
+readonly E_DEPS_MISSING=2
+readonly E_APP_LAUNCH=3
+
+# Make sure the cache directory exists
+mkdir -p "$TRAY_ICON_DIR"
+
+# Function for debug logging
+log_debug() {
+    if [ "$DEBUG" == "true" ]; then
+        echo "[DEBUG] $1"
+    fi
+}
+
+# Check for required dependencies
+check_dependencies() {
+    local missing_deps=()
+
+    if ! command -v qdbus &>/dev/null; then
+        missing_deps+=("qdbus")
+    fi
+
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo "Error: Missing required dependencies: ${missing_deps[*]}"
+        echo "Please install them with: sudo pacman -S ${missing_deps[*]}"
+        exit $E_DEPS_MISSING
+    fi
+}
+
+# Function to find all windows matching our target class
+find_windows() {
+    log_debug "Searching for windows with class: $WINDOW_CLASS"
+
+    # Try KDE-specific method first (for Wayland)
+    local window_list
+    window_list=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowList 2>/dev/null)
+
+    local matching_windows=""
+
+    for win_id in $window_list; do
+        local win_class
+        win_class=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowInfo "$win_id" | grep "resourceClass" | cut -d '"' -f 2)
+
+        if [[ "$win_class" == "$WINDOW_CLASS" ]]; then
+            matching_windows="$matching_windows $win_id"
+            log_debug "Found matching window ID: $win_id"
+        fi
+    done
+
+    # Fallback to X11 method if no windows found and xdotool is available
+    if [ -z "$matching_windows" ] && command -v xdotool &>/dev/null; then
+        log_debug "No windows found with KDE method, trying xdotool..."
+        matching_windows=$(xdotool search --class "$WINDOW_CLASS" 2>/dev/null)
+
+        # If still not found, try a more flexible approach
+        if [ -z "$matching_windows" ]; then
+            log_debug "Trying more flexible xdotool approach..."
+            matching_windows=$(xdotool search --name ".*" 2>/dev/null | \
+                          xargs -I{} sh -c "xprop -id {} WM_CLASS 2>/dev/null | grep -i \"$WINDOW_CLASS\" > /dev/null && echo {}" || echo "")
+        fi
+    fi
+
+    echo "$matching_windows"
+}
+
+# Function to check if a window is minimized/iconified
+is_minimized() {
+    local win_id=$1
+
+    # Try KDE-specific method first (works on Wayland)
+    local kde_state
+    kde_state=$(qdbus org.kde.KWin /KWin org.kde.KWin.isMinimized "$win_id" 2>/dev/null)
+
+    if [ "$kde_state" = "true" ]; then
+        log_debug "Window $win_id is minimized (KDE method)"
+        return 0  # Window is minimized
+    fi
+
+    # Fallback to X11 method if KDE method failed and xprop is available
+    if command -v xprop &>/dev/null; then
+        local state_info
+        state_info=$(xprop -id "$win_id" 2>/dev/null)
+
+        if echo "$state_info" | grep -q "window state: Iconic" || \
+           echo "$state_info" | grep -q "_NET_WM_STATE_HIDDEN"; then
+            log_debug "Window $win_id is minimized (X11 method)"
+            return 0  # Window is minimized
+        fi
+    fi
+
+    log_debug "Window $win_id is not minimized"
+    return 1  # Window is not minimized
+}
+
+# Function to activate a window
+activate_window() {
+    local win_id=$1
+
+    log_debug "Activating window $win_id"
+
+    # Try KDE-specific method first (for Wayland)
+    qdbus org.kde.KWin /KWin org.kde.KWin.unminimizeWindow "$win_id" 2>/dev/null
+    qdbus org.kde.KWin /KWin org.kde.KWin.forceActiveWindow "$win_id" 2>/dev/null
+
+    # Fallback to X11 method if xdotool is available
+    if command -v xdotool &>/dev/null; then
+        log_debug "Using xdotool fallback for window activation"
+        xdotool windowmap "$win_id" 2>/dev/null
+        xdotool windowactivate "$win_id" 2>/dev/null
+    fi
+}
+
+# Function to minimize a window
+minimize_window() {
+    local win_id=$1
+
+    log_debug "Minimizing window $win_id"
+
+    # Try KDE-specific method first (for Wayland)
+    qdbus org.kde.KWin /KWin org.kde.KWin.minimizeWindow "$win_id" 2>/dev/null
+
+    # Fallback to X11 method if xdotool is available
+    if command -v xdotool &>/dev/null; then
+        log_debug "Using xdotool fallback for window minimization"
+        xdotool windowminimize "$win_id" 2>/dev/null
+    fi
+}
+
+# Function to check if app is running
+is_app_running() {
+    local pids
+    pids=$(pgrep -f "$APP_PROCESS")
+
+    if [ -n "$pids" ]; then
+        log_debug "App is running with PIDs: $pids"
+        return 0  # App is running
+    else
+        log_debug "App is not running"
+        return 1  # App is not running
+    fi
+}
+
+# Function to check if a process is still starting up
+is_starting_up() {
+    local pids
+    pids=$(pgrep -f "$APP_PROCESS")
+
+    if [ -n "$pids" ]; then
+        for pid in $pids; do
+            local start_time
+            start_time=$(ps -o etimes= -p "$pid")
+
+            if [ "$start_time" -lt 5 ]; then
+                log_debug "App is starting up (PID $pid, started $start_time seconds ago)"
+                return 0  # True, it's starting up
+            fi
+        done
+    fi
+
+    log_debug "App is not in startup phase"
+    return 1  # False, not starting up
+}
+
+# Get icon for the tray if not specified
+get_app_icon() {
+    local icon_path="$TRAY_ICON_PATH"
+
+    # If icon path is not set, try to extract from chrome app
+    if [ -z "$icon_path" ]; then
+        log_debug "No icon path specified, looking for suitable icon"
+
+        # Create cache directory if it doesn't exist
+        mkdir -p "$TRAY_ICON_DIR"
+
+        # Look for the icon in Chrome's app data if this is a Chrome app
+        if [ -n "$APP_ID" ] && [ -n "$CHROME_PROFILE" ]; then
+            local chrome_app_dir="$HOME/.config/google-chrome/$CHROME_PROFILE/Web Applications"
+
+            # Try to find the icon file
+            local found_icon
+            found_icon=$(find "$chrome_app_dir" -path "*$APP_ID*" -name "*.png" | sort -r | head -n 1)
+
+            if [ -n "$found_icon" ]; then
+                # Copy the icon to our cache directory
+                local icon_name
+                icon_name=$(basename "$found_icon")
+                cp "$found_icon" "$TRAY_ICON_DIR/$icon_name"
+                icon_path="$TRAY_ICON_DIR/$icon_name"
+                log_debug "Found and using Chrome app icon: $icon_path"
+            fi
+        fi
+
+        # If still no icon, use a default one
+        if [ -z "$icon_path" ]; then
+            icon_path="internet-web-browser"  # Use a system icon
+            log_debug "Using default system icon: $icon_path"
+        fi
+    else
+        log_debug "Using specified icon: $icon_path"
+    fi
+
+    echo "$icon_path"
+}
+
+# Function to show notification
+show_notification() {
+    if [ "$NOTIFICATIONS" != "true" ]; then
+        return
+    fi
+
+    local message=$1
+    local icon_path
+    icon_path=$(get_app_icon)
+
+    log_debug "Showing notification: $message"
+
+    # Use notify-send if available
+    if command -v notify-send &>/dev/null; then
+        notify-send -i "$icon_path" "$TRAY_NAME" "$message"
+    # Fall back to kdialog passive popup
+    elif command -v kdialog &>/dev/null; then
+        kdialog --passivepopup "$message" 2 --title "$TRAY_NAME" --icon "$icon_path" &
+    else
+        echo "$message"
+    fi
+}
+
+# Apply window properties for KDE
+apply_window_properties() {
+    local win_id=$1
+
+    log_debug "Applying window properties to window $win_id"
+
+    # Force apply window rules using KWin
+    qdbus org.kde.KWin /KWin org.kde.KWin.setMaximize "$win_id" true true 2>/dev/null
+
+    # Try to apply X11 properties if running on X11
+    if [ "$XDG_SESSION_TYPE" = "x11" ] && command -v xprop &>/dev/null; then
+        log_debug "Applying X11 window properties"
+        # Apply the "skip taskbar" property
+        xprop -id "$win_id" -f _NET_WM_STATE 32a -set _NET_WM_STATE _NET_WM_STATE_SKIP_TASKBAR 2>/dev/null
+    fi
+
+    # Reconfigure KWin to ensure rules are applied
+    qdbus org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null
+}
+
+# Main function
+main() {
+    log_debug "Starting toggle script"
+
+    # Check for required dependencies
+    check_dependencies
+
+    # Find app windows
+    local window_ids
+    window_ids=($(find_windows))
+    log_debug "Found ${#window_ids[@]} window(s)"
+
+    # If app is running, toggle window state
+    if is_app_running; then
+        # If we found windows matching our class
+        if [ ${#window_ids[@]} -gt 0 ]; then
+            # Check if app is just starting
+            if is_starting_up; then
+                log_debug "App is starting, waiting..."
+                show_notification "App is starting..."
+                sleep 3
+
+                # Refresh window list
+                window_ids=($(find_windows))
+                log_debug "Refreshed window list, found ${#window_ids[@]} window(s)"
+
+                # Get the first window only
+                local win_id=${window_ids[0]}
+                activate_window "$win_id"
+
+                # Kill any duplicate windows
+                if [ ${#window_ids[@]} -gt 1 ]; then
+                    log_debug "Found duplicate windows, closing extras"
+                    for (( i=1; i<${#window_ids[@]}; i++ )); do
+                        if command -v xdotool &>/dev/null; then
+                            xdotool windowclose "${window_ids[$i]}" 2>/dev/null
+                            log_debug "Closed duplicate window: ${window_ids[$i]}"
+                        fi
+                    done
+                fi
+
+                apply_window_properties "$win_id"
+                show_notification "Application is now active"
+                exit 0
+            fi
+
+            # Get the first window and toggle its state
+            local win_id=${window_ids[0]}
+
+            # Close any duplicate windows
+            if [ ${#window_ids[@]} -gt 1 ]; then
+                log_debug "Found duplicate windows, closing extras"
+                for (( i=1; i<${#window_ids[@]}; i++ )); do
+                    if command -v xdotool &>/dev/null; then
+                        xdotool windowclose "${window_ids[$i]}" 2>/dev/null
+                        log_debug "Closed duplicate window: ${window_ids[$i]}"
+                    fi
+                done
+            fi
+
+            if is_minimized "$win_id"; then
+                log_debug "Restoring window..."
+                activate_window "$win_id"
+                show_notification "Restoring application"
+            else
+                log_debug "Minimizing window..."
+                minimize_window "$win_id"
+                show_notification "Application minimized"
+            fi
+
+            # Apply window properties
+            apply_window_properties "$win_id"
+        else
+            # No windows found but process is running
+            log_debug "No windows found but process is running, launching app..."
+            show_notification "Launching application..."
+
+            # Choose launch method based on configuration
+            if [ -n "$CHROME_EXEC" ] && [ -n "$APP_ID" ]; then
+                log_debug "Launching as Chrome app"
+                "$CHROME_EXEC" --profile-directory="$CHROME_PROFILE" --app-id="$APP_ID" &
+            else
+                log_debug "Launching with APP_COMMAND"
+                eval "$APP_COMMAND" &
+            fi
+
+            if [ $? -ne 0 ]; then
+                log_debug "Failed to launch app"
+                show_notification "Error: Failed to launch application"
+                exit $E_APP_LAUNCH
+            fi
+
+            # Wait for window to appear
+            log_debug "Waiting for window to appear..."
+            sleep 3
+            window_ids=($(find_windows))
+
+            if [ ${#window_ids[@]} -gt 0 ]; then
+                activate_window "${window_ids[0]}"
+                apply_window_properties "${window_ids[0]}"
+                show_notification "Application is now active"
+            else
+                log_debug "No windows found after launch!"
+                show_notification "Warning: Application window not found"
+            fi
+        fi
+    else
+        # App is not running at all, so launch it
+        log_debug "App is not running, launching..."
+        show_notification "Launching application..."
+
+        # Choose launch method based on configuration
+        if [ -n "$CHROME_EXEC" ] && [ -n "$APP_ID" ]; then
+            log_debug "Launching as Chrome app"
+            "$CHROME_EXEC" --profile-directory="$CHROME_PROFILE" --app-id="$APP_ID" &
+        else
+            log_debug "Launching with APP_COMMAND"
+            eval "$APP_COMMAND" &
+        fi
+
+        if [ $? -ne 0 ]; then
+            log_debug "Failed to launch app"
+            show_notification "Error: Failed to launch application"
+            exit $E_APP_LAUNCH
+        fi
+
+        # Wait for app to start and capture window
+        log_debug "Waiting for window to appear..."
+        sleep 3
+        window_ids=($(find_windows))
+
+        # If window found after starting, make sure it's activated
+        if [ ${#window_ids[@]} -gt 0 ]; then
+            activate_window "${window_ids[0]}"
+            apply_window_properties "${window_ids[0]}"
+            show_notification "Application is now active"
+        else
+            log_debug "No windows found after launching app!"
+            show_notification "Warning: Application window not found"
+        fi
+    fi
+
+    exit 0
+}
+
+# Run the main function
+main

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Toggleman
+GenericName=Toggle Application Manager
+Comment=Manage application toggle scripts for KDE
+Exec=toggleman
+Icon=toggleman
+Terminal=false
+Categories=Utility;System;
+Keywords=toggle;application;manager;kde;wayland;
+StartupNotify=true
