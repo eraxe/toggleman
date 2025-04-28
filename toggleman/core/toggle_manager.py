@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 import shutil
+import copy
 
 from toggleman.core.debug import get_logger
 from toggleman.core.script_generator import ScriptGenerator
@@ -46,13 +47,17 @@ class ToggleManager:
         Returns:
             Tuple of (success, message)
         """
-        # Validate configuration
-        if not self._validate_config(config):
-            return False, "Invalid configuration: missing required fields"
-
         # Save script configuration
         if not self.config_manager.save_script(name, config):
             return False, f"Failed to save script configuration for {name}"
+
+        # If this is a draft, don't generate the script file
+        if config.get("is_draft", False):
+            return True, f"Toggle script '{name}' saved as a draft"
+
+        # Validate configuration for script generation
+        if not self._validate_config(config):
+            return False, "Invalid configuration: missing required fields"
 
         # Generate script file
         return self.script_generator.generate_script(name)
@@ -71,16 +76,70 @@ class ToggleManager:
         if not self.config_manager.get_script(name):
             return False, f"Toggle script '{name}' not found"
 
-        # Validate configuration
-        if not self._validate_config(config):
-            return False, "Invalid configuration: missing required fields"
-
         # Save script configuration
         if not self.config_manager.save_script(name, config):
             return False, f"Failed to save script configuration for {name}"
 
+        # If this is a draft, don't generate the script file
+        if config.get("is_draft", False):
+            return True, f"Toggle script '{name}' saved as a draft"
+
+        # Validate configuration for script generation
+        if not self._validate_config(config):
+            return False, "Invalid configuration: missing required fields"
+
         # Regenerate script file
         return self.script_generator.generate_script(name)
+
+    def duplicate_toggle(self, name: str, new_name: str = None) -> Tuple[bool, str]:
+        """Duplicate a toggle script.
+
+        Args:
+            name: The name of the toggle script to duplicate
+            new_name: Optional new name for the duplicate (defaults to "{name}_copy")
+
+        Returns:
+            Tuple of (success, message)
+        """
+        # Get script configuration
+        script_config = self.config_manager.get_script(name)
+        if not script_config:
+            return False, f"Toggle script '{name}' not found"
+
+        # Create a copy of the configuration
+        new_config = copy.deepcopy(script_config)
+
+        # Generate new name if not provided
+        if not new_name:
+            new_name = f"{name}_copy"
+
+            # Make sure the name doesn't already exist
+            counter = 1
+            while self.config_manager.get_script(new_name):
+                new_name = f"{name}_copy_{counter}"
+                counter += 1
+
+        # Update name in config
+        new_config["name"] = new_name
+
+        # Clear script path to force regeneration
+        if "script_path" in new_config:
+            new_config["script_path"] = ""
+
+        # Update description
+        if "description" in new_config:
+            new_config["description"] = f"Copy of {name}: {new_config.get('description', '')}"
+
+        # Save the new script configuration
+        if not self.config_manager.save_script(new_name, new_config):
+            return False, f"Failed to save duplicate script configuration for {new_name}"
+
+        # If it's a draft, just return success
+        if new_config.get("is_draft", False):
+            return True, f"Toggle script '{name}' duplicated as '{new_name}' (draft)"
+
+        # Generate script file
+        return self.script_generator.generate_script(new_name)
 
     def delete_toggle(self, name: str) -> Tuple[bool, str]:
         """Delete a toggle script.
@@ -116,6 +175,10 @@ class ToggleManager:
         script_config = self.config_manager.get_script(name)
         if not script_config:
             return False, f"Toggle script '{name}' not found"
+
+        # Check if this is a draft
+        if script_config.get("is_draft", False):
+            return False, f"Cannot run draft script '{name}'. Please complete the script configuration first."
 
         # Get script path
         script_path = script_config.get("script_path", "")

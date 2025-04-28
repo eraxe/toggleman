@@ -324,18 +324,9 @@ class ScriptEditorDialog(QDialog):
         Returns:
             Tuple of (valid, error_message)
         """
-        # Check required fields
+        # Check if name is provided (always required)
         if not script_data["name"]:
             return False, "Name is required"
-
-        if not script_data["app_command"]:
-            return False, "Application Command is required"
-
-        if not script_data["app_process"]:
-            return False, "Application Process Pattern is required"
-
-        if not script_data["window_class"]:
-            return False, "Window Class is required"
 
         # Check name format (only allow alphanumeric, dash, underscore)
         import re
@@ -345,6 +336,10 @@ class ScriptEditorDialog(QDialog):
         # Check if name already exists (only if creating new script)
         if not self.editing_mode and self.config_manager.get_script(script_data["name"]):
             return False, f"A toggle script with the name '{script_data['name']}' already exists"
+
+        # Check if this is a draft (missing required fields)
+        is_draft = not script_data["app_command"] or not script_data["window_class"]
+        script_data["is_draft"] = is_draft
 
         return True, ""
 

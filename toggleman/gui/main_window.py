@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QSystemTrayIcon, QStyle, QDialog, QMessageBox, QFileDialog, QSplitter,
     QTabWidget, QTextEdit, QSizePolicy, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QGroupBox, QCheckBox, QFrame, QComboBox,
-    QApplication
+    QApplication, QInputDialog
 )
 from PyQt5.QtGui import QIcon, QPixmap, QFont, QDesktopServices, QColor
 from PyQt5.QtCore import Qt, QSize, QTimer, QUrl, pyqtSignal, pyqtSlot
@@ -97,6 +97,10 @@ class MainWindow(QMainWindow):
         edit_action.triggered.connect(self._on_edit_script)
         toolbar.addAction(edit_action)
 
+        duplicate_action = QAction(self.style().standardIcon(QStyle.SP_FileLinkIcon), "Duplicate Toggle", self)
+        duplicate_action.triggered.connect(self._on_duplicate_script)
+        toolbar.addAction(duplicate_action)
+
         remove_action = QAction(self.style().standardIcon(QStyle.SP_TrashIcon), "Remove Toggle", self)
         remove_action.triggered.connect(self._on_remove_script)
         toolbar.addAction(remove_action)
@@ -150,6 +154,10 @@ class MainWindow(QMainWindow):
         edit_button = QPushButton("Edit Toggle")
         edit_button.clicked.connect(self._on_edit_script)
         action_layout.addWidget(edit_button)
+
+        duplicate_button = QPushButton("Duplicate Toggle")
+        duplicate_button.clicked.connect(self._on_duplicate_script)
+        action_layout.addWidget(duplicate_button)
 
         shortcut_button = QPushButton("Set Shortcut")
         shortcut_button.clicked.connect(self._on_set_shortcut)
@@ -216,6 +224,10 @@ class MainWindow(QMainWindow):
         edit_action = QAction("&Edit Toggle", self)
         edit_action.triggered.connect(self._on_edit_script)
         toggle_menu.addAction(edit_action)
+
+        duplicate_action = QAction("Du&plicate Toggle", self)
+        duplicate_action.triggered.connect(self._on_duplicate_script)
+        toggle_menu.addAction(duplicate_action)
 
         remove_action = QAction("&Remove Toggle", self)
         remove_action.triggered.connect(self._on_remove_script)
@@ -355,14 +367,24 @@ class MainWindow(QMainWindow):
                     self.scripts_table.setItem(row, 1, desc_item)
 
                 # Update status
-                status = "Running" if name in running_toggles else "Stopped"
+                is_draft = config.get("is_draft", False)
+                if is_draft:
+                    status = "Draft"
+                    status_color = QColor("blue")
+                elif name in running_toggles:
+                    status = "Running"
+                    status_color = QColor("green")
+                else:
+                    status = "Stopped"
+                    status_color = QColor("red")
+
                 status_item = self.scripts_table.item(row, 2)
                 if status_item and status_item.text() != status:
                     status_item.setText(status)
-                    status_item.setForeground(QColor("green" if status == "Running" else "red"))
+                    status_item.setForeground(status_color)
                 elif not status_item:
                     status_item = QTableWidgetItem(status)
-                    status_item.setForeground(QColor("green" if status == "Running" else "red"))
+                    status_item.setForeground(status_color)
                     status_item.setTextAlignment(Qt.AlignCenter)
                     self.scripts_table.setItem(row, 2, status_item)
 
@@ -396,9 +418,19 @@ class MainWindow(QMainWindow):
                 self.scripts_table.setItem(row, 1, desc_item)
 
                 # Status
-                status = "Running" if name in running_toggles else "Stopped"
+                is_draft = config.get("is_draft", False)
+                if is_draft:
+                    status = "Draft"
+                    status_color = QColor("blue")
+                elif name in running_toggles:
+                    status = "Running"
+                    status_color = QColor("green")
+                else:
+                    status = "Stopped"
+                    status_color = QColor("red")
+
                 status_item = QTableWidgetItem(status)
-                status_item.setForeground(QColor("green" if status == "Running" else "red"))
+                status_item.setForeground(status_color)
                 status_item.setTextAlignment(Qt.AlignCenter)
                 self.scripts_table.setItem(row, 2, status_item)
 
@@ -579,6 +611,38 @@ class MainWindow(QMainWindow):
             # Show success message
             self.status_bar.showMessage(f"Toggle script '{script_name}' updated successfully")
 
+    def _on_duplicate_script(self):
+        """Handle duplicating a toggle script."""
+        # Get selected script
+        script_name = self._get_selected_script()
+        if not script_name:
+            QMessageBox.warning(self, "No Selection", "Please select a toggle script to duplicate.")
+            return
+
+        # Ask for new name
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Duplicate Toggle Script",
+            "Enter a name for the duplicate:",
+            text=f"{script_name}_copy"
+        )
+
+        if not ok or not new_name:
+            return
+
+        # Duplicate the script
+        success, message = self.toggle_manager.duplicate_toggle(script_name, new_name)
+
+        if success:
+            # Reload scripts
+            self._load_scripts()
+
+            # Show success message
+            self.status_bar.showMessage(f"Toggle script '{script_name}' duplicated as '{new_name}'")
+        else:
+            # Show error message
+            QMessageBox.critical(self, "Error", f"Failed to duplicate toggle script: {message}")
+
     def _on_remove_script(self):
         """Handle removing a toggle script."""
         # Get selected script
@@ -646,8 +710,6 @@ class MainWindow(QMainWindow):
         current_shortcut = script_config.get("kwin_shortcut", "")
 
         # Ask for new shortcut
-        from PyQt5.QtWidgets import QInputDialog
-
         shortcut, ok = QInputDialog.getText(
             self,
             "Set Keyboard Shortcut",
@@ -942,6 +1004,10 @@ class MainWindow(QMainWindow):
         edit_action = QAction("Edit", self)
         edit_action.triggered.connect(lambda: self._on_edit_script())
         menu.addAction(edit_action)
+
+        duplicate_action = QAction("Duplicate", self)
+        duplicate_action.triggered.connect(lambda: self._on_duplicate_script())
+        menu.addAction(duplicate_action)
 
         shortcut_action = QAction("Set Shortcut", self)
         shortcut_action.triggered.connect(lambda: self._on_set_shortcut())

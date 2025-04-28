@@ -73,7 +73,10 @@ class ScriptGenerator:
                 "APP_ID": script_config.get("app_id", ""),
                 "TRAY_ICON_PATH": script_config.get("icon_path", ""),
                 "DEBUG": "true" if script_config.get("debug", False) else "false",
-                "NOTIFICATIONS": "true" if script_config.get("notifications", True) else "false"
+                "NOTIFICATIONS": "true" if script_config.get("notifications", True) else "false",
+
+                # Environment variables
+                "HOME": os.path.expanduser("~")
             }
 
             # Substitute variables in template
