@@ -8,6 +8,7 @@ and monitoring their status.
 import os
 import subprocess
 import signal
+import stat
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
@@ -128,9 +129,26 @@ class ToggleManager:
             script_config = self.config_manager.get_script(name)
             script_path = script_config.get("script_path", "")
 
+            if not script_path or not os.path.exists(script_path):
+                return False, f"Failed to generate script file at {script_path}"
+
+        # Check if script is executable
+        if not os.access(script_path, os.X_OK):
+            try:
+                # Try to make it executable
+                os.chmod(script_path, os.stat(script_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            except Exception as e:
+                return False, f"Script file exists but is not executable: {e}"
+
         # Run the script
         try:
-            subprocess.Popen([script_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # Run with shell=False for better security
+            process = subprocess.Popen([script_path],
+                                      stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE,
+                                      start_new_session=True)  # Detach the process
+
+            # Don't wait for it to complete - return immediately
             return True, f"Running toggle script {name}"
         except Exception as e:
             logger.error(f"Error running toggle script {name}: {e}")
@@ -192,6 +210,91 @@ class ToggleManager:
             return False, "Toggle script test timed out after 10 seconds", {
                 "stdout": "Timeout",
                 "stderr": "Script execution timed out after 10 seconds",
+                "return_code": -1,
+                "script_path": script_path,
+                "config": script_config
+            }
+        except Exception as e:
+            logger.error(f"Error testing toggle script {name}: {e}")
+            return False, f"Error testing toggle script: {str(e)}", {
+                "stdout": "",
+                "stderr": str(e),
+                "return_code": -1,
+                "script_path": script_path,
+                "config": script_config
+            }
+
+    def test_toggle_with_timeout(self, name: str, timeout: int = 3) -> Tuple[bool, str, Dict[str, Any]]:
+        """Test a toggle script with timeout and return detailed output.
+
+        Args:
+            name: The name of the toggle script
+            timeout: Timeout in seconds
+
+        Returns:
+            Tuple of (success, message, details)
+        """
+        # Get script configuration
+        script_config = self.config_manager.get_script(name)
+        if not script_config:
+            return False, f"Toggle script '{name}' not found", {}
+
+        # Get script path
+        script_path = script_config.get("script_path", "")
+        if not script_path or not os.path.exists(script_path):
+            # Try to generate the script if it doesn't exist
+            success, message = self.script_generator.generate_script(name)
+            if not success:
+                return False, f"Script file not found and could not be generated: {message}", {}
+
+            # Get updated script config with path
+            script_config = self.config_manager.get_script(name)
+            script_path = script_config.get("script_path", "")
+
+        # Check if script is executable
+        if not os.access(script_path, os.X_OK):
+            try:
+                # Try to make it executable
+                os.chmod(script_path, os.stat(script_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            except Exception as e:
+                return False, f"Script file exists but is not executable: {e}", {
+                    "stdout": "",
+                    "stderr": f"Script not executable: {e}",
+                    "return_code": -1,
+                    "script_path": script_path,
+                    "config": script_config
+                }
+
+        # Set debug mode for the test
+        test_env = os.environ.copy()
+        test_env["DEBUG"] = "true"
+
+        # Run the script with capture
+        try:
+            result = subprocess.run([script_path],
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE,
+                                   env=test_env,
+                                   encoding='utf-8',
+                                   timeout=timeout)
+
+            details = {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "return_code": result.returncode,
+                "script_path": script_path,
+                "config": script_config
+            }
+
+            if result.returncode == 0:
+                return True, "Toggle script test completed successfully", details
+            else:
+                return False, f"Toggle script test failed with return code {result.returncode}", details
+
+        except subprocess.TimeoutExpired:
+            return False, f"Toggle script test timed out after {timeout} seconds", {
+                "stdout": "Timeout",
+                "stderr": f"Script execution timed out after {timeout} seconds",
                 "return_code": -1,
                 "script_path": script_path,
                 "config": script_config

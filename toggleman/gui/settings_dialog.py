@@ -132,6 +132,12 @@ class SettingsDialog(QDialog):
         self.auto_refresh_checkbox = QCheckBox("Automatically refresh toggle script status")
         behavior_form.addRow("", self.auto_refresh_checkbox)
 
+        self.refresh_interval_spin = QSpinBox()
+        self.refresh_interval_spin.setMinimum(1)
+        self.refresh_interval_spin.setMaximum(60)
+        self.refresh_interval_spin.setSuffix(" seconds")
+        behavior_form.addRow("Refresh interval:", self.refresh_interval_spin)
+
         self.minimize_to_tray_checkbox = QCheckBox("Minimize to system tray when closing")
         behavior_form.addRow("", self.minimize_to_tray_checkbox)
 
@@ -233,6 +239,7 @@ class SettingsDialog(QDialog):
         # Behavior settings
         self.original_settings["confirm_delete"] = self.config_manager.get_setting("behavior", "confirm_delete", True)
         self.original_settings["auto_refresh"] = self.config_manager.get_setting("behavior", "auto_refresh", True)
+        self.original_settings["refresh_interval"] = self.config_manager.get_setting("behavior", "refresh_interval", 5)
         self.original_settings["minimize_to_tray"] = self.config_manager.get_setting("behavior", "minimize_to_tray",
                                                                                      True)
         self.original_settings["notifications"] = self.config_manager.get_setting("behavior", "notifications", True)
@@ -262,6 +269,7 @@ class SettingsDialog(QDialog):
         # Behavior settings
         self.confirm_delete_checkbox.setChecked(self.original_settings["confirm_delete"])
         self.auto_refresh_checkbox.setChecked(self.original_settings["auto_refresh"])
+        self.refresh_interval_spin.setValue(self.original_settings["refresh_interval"])
         self.minimize_to_tray_checkbox.setChecked(self.original_settings["minimize_to_tray"])
         self.notifications_checkbox.setChecked(self.original_settings["notifications"])
 
@@ -295,6 +303,7 @@ class SettingsDialog(QDialog):
         # Behavior settings
         settings["confirm_delete"] = self.confirm_delete_checkbox.isChecked()
         settings["auto_refresh"] = self.auto_refresh_checkbox.isChecked()
+        settings["refresh_interval"] = self.refresh_interval_spin.value()
         settings["minimize_to_tray"] = self.minimize_to_tray_checkbox.isChecked()
         settings["notifications"] = self.notifications_checkbox.isChecked()
 
@@ -328,7 +337,7 @@ class SettingsDialog(QDialog):
                     section = "general"
                 elif key in ["theme", "icon_size"]:
                     section = "appearance"
-                elif key in ["confirm_delete", "auto_refresh", "minimize_to_tray", "notifications"]:
+                elif key in ["confirm_delete", "auto_refresh", "refresh_interval", "minimize_to_tray", "notifications"]:
                     section = "behavior"
                 elif key in ["enable_shortcuts", "enable_rules"]:
                     section = "kwin"

@@ -6,6 +6,7 @@ This module provides the main GUI window for managing toggle scripts.
 
 import os
 import sys
+import stat
 from typing import Dict, List, Optional, Any, Tuple
 
 from PyQt5.QtWidgets import (
@@ -13,7 +14,8 @@ from PyQt5.QtWidgets import (
     QPushButton, QLabel, QAction, QMenu, QMenuBar, QToolBar, QStatusBar,
     QSystemTrayIcon, QStyle, QDialog, QMessageBox, QFileDialog, QSplitter,
     QTabWidget, QTextEdit, QSizePolicy, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QGroupBox, QCheckBox, QFrame, QComboBox
+    QHeaderView, QAbstractItemView, QGroupBox, QCheckBox, QFrame, QComboBox,
+    QApplication
 )
 from PyQt5.QtGui import QIcon, QPixmap, QFont, QDesktopServices, QColor
 from PyQt5.QtCore import Qt, QSize, QTimer, QUrl, pyqtSignal, pyqtSlot
@@ -128,6 +130,13 @@ class MainWindow(QMainWindow):
         self.scripts_table.setAlternatingRowColors(True)
         self.scripts_table.doubleClicked.connect(self._on_script_double_clicked)
 
+        # Add context menu to scripts table
+        self.scripts_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.scripts_table.customContextMenuRequested.connect(self._on_scripts_context_menu)
+
+        # Add key press event handler
+        self.scripts_table.keyPressEvent = self._scripts_key_press_event
+
         # Add scripts table to layout
         main_layout.addWidget(self.scripts_table)
 
@@ -194,7 +203,7 @@ class MainWindow(QMainWindow):
 
         exit_action = QAction("E&xit", self)
         exit_action.setShortcut("Ctrl+Q")
-        exit_action.triggered.connect(self.close)
+        exit_action.triggered.connect(self.quit_application)
         file_menu.addAction(exit_action)
 
         # Toggle menu
@@ -254,6 +263,7 @@ class MainWindow(QMainWindow):
         # Add scripts to menu
         for name in self.config_manager.get_all_scripts().keys():
             script_action = QAction(name, self)
+            script_action.setIcon(self._get_script_icon(name))  # Set script-specific icon
             script_action.triggered.connect(lambda checked, n=name: self._on_tray_run_script(n))
             tray_menu.addAction(script_action)
 
@@ -271,7 +281,7 @@ class MainWindow(QMainWindow):
         tray_menu.addSeparator()
 
         quit_action = QAction("Quit", self)
-        quit_action.triggered.connect(self.close)
+        quit_action.triggered.connect(self.quit_application)
         tray_menu.addAction(quit_action)
 
         # Set the tray icon menu
@@ -289,78 +299,176 @@ class MainWindow(QMainWindow):
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._load_scripts)
 
-        # Start timer (refresh every 5 seconds)
-        self.refresh_timer.start(5000)
+        # Get refresh interval from settings (in seconds)
+        refresh_interval = self.config_manager.get_setting("behavior", "refresh_interval", 5)
+
+        # Start timer (convert seconds to milliseconds)
+        self.refresh_timer.start(refresh_interval * 1000)
+
+        logger.debug(f"Refresh timer started with interval: {refresh_interval} seconds")
 
     def _load_scripts(self):
-        """Load and display toggle scripts."""
+        """Load and display toggle scripts while preserving selection."""
         # Get all scripts
         scripts = self.config_manager.get_all_scripts()
 
         # Get running toggles
         running_toggles = self.toggle_manager.get_running_toggles()
 
-        # Clear table
-        self.scripts_table.setRowCount(0)
+        # Store current selection
+        current_selected_row = -1
+        selected_rows = self.scripts_table.selectionModel().selectedRows()
+        if selected_rows:
+            current_selected_row = selected_rows[0].row()
+            current_selected_name = self.scripts_table.item(current_selected_row, 0).text() if current_selected_row >= 0 else None
+        else:
+            current_selected_name = None
 
-        # Add scripts to table
-        for row, (name, config) in enumerate(scripts.items()):
-            self.scripts_table.insertRow(row)
+        # Block signals temporarily to prevent selection change signals
+        self.scripts_table.blockSignals(True)
 
-            # Name
-            name_item = QTableWidgetItem(name)
-            self.scripts_table.setItem(row, 0, name_item)
+        # Get current row count
+        current_row_count = self.scripts_table.rowCount()
 
-            # Description
-            desc_item = QTableWidgetItem(config.get("description", ""))
-            self.scripts_table.setItem(row, 1, desc_item)
+        # Check if we have the same scripts as before
+        if current_row_count == len(scripts):
+            # Update existing rows instead of clearing and rebuilding
+            for row, (name, config) in enumerate(scripts.items()):
+                # Update name
+                name_item = self.scripts_table.item(row, 0)
+                if name_item and name_item.text() != name:
+                    name_item.setText(name)
+                    name_item.setIcon(self._get_script_icon(name))
 
-            # Status
-            status = "Running" if name in running_toggles else "Stopped"
-            status_item = QTableWidgetItem(status)
-            status_item.setForeground(QColor("green" if status == "Running" else "red"))
-            status_item.setTextAlignment(Qt.AlignCenter)
-            self.scripts_table.setItem(row, 2, status_item)
+                elif not name_item:
+                    name_item = QTableWidgetItem(name)
+                    name_item.setIcon(self._get_script_icon(name))
+                    self.scripts_table.setItem(row, 0, name_item)
 
-            # Shortcut
-            shortcut = config.get("kwin_shortcut", "")
-            shortcut_item = QTableWidgetItem(shortcut)
-            self.scripts_table.setItem(row, 3, shortcut_item)
+                # Update description
+                desc_item = self.scripts_table.item(row, 1)
+                desc_text = config.get("description", "")
+                if desc_item and desc_item.text() != desc_text:
+                    desc_item.setText(desc_text)
+                elif not desc_item:
+                    desc_item = QTableWidgetItem(desc_text)
+                    self.scripts_table.setItem(row, 1, desc_item)
 
-        # Update tray icon menu
-        if self.tray_icon:
-            tray_menu = QMenu()
+                # Update status
+                status = "Running" if name in running_toggles else "Stopped"
+                status_item = self.scripts_table.item(row, 2)
+                if status_item and status_item.text() != status:
+                    status_item.setText(status)
+                    status_item.setForeground(QColor("green" if status == "Running" else "red"))
+                elif not status_item:
+                    status_item = QTableWidgetItem(status)
+                    status_item.setForeground(QColor("green" if status == "Running" else "red"))
+                    status_item.setTextAlignment(Qt.AlignCenter)
+                    self.scripts_table.setItem(row, 2, status_item)
 
-            # Add scripts to menu
-            for name in scripts.keys():
-                script_action = QAction(name, self)
-                script_action.triggered.connect(lambda checked, n=name: self._on_tray_run_script(n))
-                tray_menu.addAction(script_action)
+                # Update shortcut
+                shortcut = config.get("kwin_shortcut", "")
+                shortcut_item = self.scripts_table.item(row, 3)
+                if shortcut_item and shortcut_item.text() != shortcut:
+                    shortcut_item.setText(shortcut)
+                elif not shortcut_item:
+                    shortcut_item = QTableWidgetItem(shortcut)
+                    self.scripts_table.setItem(row, 3, shortcut_item)
 
-            if scripts:
-                tray_menu.addSeparator()
+                # Check if this was the selected script
+                if name == current_selected_name:
+                    current_selected_row = row
+        else:
+            # Scripts have changed, need to rebuild table
+            self.scripts_table.setRowCount(0)
 
-            show_action = QAction("Show", self)
-            show_action.triggered.connect(self.show)
-            tray_menu.addAction(show_action)
+            # Add scripts to table
+            for row, (name, config) in enumerate(scripts.items()):
+                self.scripts_table.insertRow(row)
 
-            hide_action = QAction("Hide", self)
-            hide_action.triggered.connect(self.hide)
-            tray_menu.addAction(hide_action)
+                # Name
+                name_item = QTableWidgetItem(name)
+                name_item.setIcon(self._get_script_icon(name))
+                self.scripts_table.setItem(row, 0, name_item)
 
-            tray_menu.addSeparator()
+                # Description
+                desc_item = QTableWidgetItem(config.get("description", ""))
+                self.scripts_table.setItem(row, 1, desc_item)
 
-            quit_action = QAction("Quit", self)
-            quit_action.triggered.connect(self.close)
-            tray_menu.addAction(quit_action)
+                # Status
+                status = "Running" if name in running_toggles else "Stopped"
+                status_item = QTableWidgetItem(status)
+                status_item.setForeground(QColor("green" if status == "Running" else "red"))
+                status_item.setTextAlignment(Qt.AlignCenter)
+                self.scripts_table.setItem(row, 2, status_item)
 
-            # Set the tray icon menu
-            self.tray_icon.setContextMenu(tray_menu)
+                # Shortcut
+                shortcut = config.get("kwin_shortcut", "")
+                shortcut_item = QTableWidgetItem(shortcut)
+                self.scripts_table.setItem(row, 3, shortcut_item)
+
+                # Check if this was the selected script
+                if name == current_selected_name:
+                    current_selected_row = row
+
+        # Update tray icon menu (similar approach to preserve the structure)
+        self._update_tray_menu(scripts)
 
         # Update status bar
         count = len(scripts)
         running = len(running_toggles)
         self.status_bar.showMessage(f"{count} toggle scripts ({running} running)")
+
+        # Restore selection if possible
+        if current_selected_row >= 0 and current_selected_row < self.scripts_table.rowCount():
+            self.scripts_table.selectRow(current_selected_row)
+
+        # Unblock signals
+        self.scripts_table.blockSignals(False)
+
+    def _update_tray_menu(self, scripts):
+        """Update the tray icon menu without recreating it."""
+        if not self.tray_icon:
+            return
+
+        # Get existing menu
+        tray_menu = self.tray_icon.contextMenu()
+        if not tray_menu:
+            # If no menu exists, create a new one
+            self._setup_tray_icon()
+            return
+
+        # Clear the entire menu and rebuild from scratch
+        tray_menu.clear()
+
+        # Add scripts to menu
+        for name in scripts.keys():
+            script_action = QAction(name, self)
+            script_action.setIcon(self._get_script_icon(name))
+            script_action.triggered.connect(lambda checked, n=name: self._on_tray_run_script(n))
+            tray_menu.addAction(script_action)
+
+        # Add separator if there are scripts
+        if scripts:
+            tray_menu.addSeparator()
+
+        # Add standard actions
+        show_action = QAction("Show", self)
+        show_action.triggered.connect(self.show)
+        tray_menu.addAction(show_action)
+
+        hide_action = QAction("Hide", self)
+        hide_action.triggered.connect(self.hide)
+        tray_menu.addAction(hide_action)
+
+        tray_menu.addSeparator()
+
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(self.quit_application)
+        tray_menu.addAction(quit_action)
+
+        # Re-set the menu
+        self.tray_icon.setContextMenu(tray_menu)
 
     def _get_selected_script(self) -> Optional[str]:
         """Get the currently selected script name.
@@ -385,11 +493,17 @@ class MainWindow(QMainWindow):
         Returns:
             The application icon
         """
-        # Try to find the icon
+        # First check if there's a custom icon from settings
+        custom_icon = self.config_manager.get_setting("appearance", "custom_icon_path", "")
+        if custom_icon and os.path.exists(custom_icon):
+            return QIcon(custom_icon)
+
+        # Try to find the default icon
         icon_paths = [
+            "/usr/share/icons/hicolor/128x128/apps/toggleman.png",
             "/usr/share/icons/hicolor/128x128/apps/toggleman.svg",
             "/opt/toggleman/icons/toggleman.svg",
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), "resources", "toggleman.svg")
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "icons", "toggleman.svg")
         ]
 
         for path in icon_paths:
@@ -398,6 +512,42 @@ class MainWindow(QMainWindow):
 
         # Fallback to system icon
         return self.style().standardIcon(QStyle.SP_DesktopIcon)
+
+    def _get_script_icon(self, script_name: str) -> QIcon:
+        """Get the icon for a specific toggle script.
+
+        Args:
+            script_name: The name of the toggle script
+
+        Returns:
+            The script icon
+        """
+        # Get script configuration
+        script_config = self.config_manager.get_script(script_name)
+        if not script_config:
+            return self._get_app_icon()
+
+        # Get icon path from configuration
+        icon_path = script_config.get("icon_path", "")
+        if icon_path and os.path.exists(icon_path):
+            return QIcon(icon_path)
+
+        # If this is a Chrome app, try to get the Chrome app icon
+        if script_config.get("chrome_exec") and script_config.get("app_id"):
+            chrome_profile = script_config.get("chrome_profile", "Default")
+            app_id = script_config.get("app_id")
+
+            # Look for icon in Chrome app directory
+            chrome_app_dir = os.path.expanduser(f"~/.config/google-chrome/{chrome_profile}/Web Applications")
+            if os.path.exists(chrome_app_dir):
+                import glob
+                icon_files = glob.glob(f"{chrome_app_dir}/*{app_id}*/*.png")
+                if icon_files:
+                    # Use the first (probably largest) icon
+                    return QIcon(icon_files[0])
+
+        # Fallback to app icon
+        return self._get_app_icon()
 
     def _on_new_script(self):
         """Handle creating a new toggle script."""
@@ -595,9 +745,13 @@ class MainWindow(QMainWindow):
 
             # Update refresh timer if needed
             auto_refresh = self.config_manager.get_setting("behavior", "auto_refresh", True)
+            refresh_interval = self.config_manager.get_setting("behavior", "refresh_interval", 5)
 
             if auto_refresh and not self.refresh_timer:
                 self._setup_refresh_timer()
+            elif auto_refresh and self.refresh_timer:
+                # Update interval
+                self.refresh_timer.setInterval(refresh_interval * 1000)
             elif not auto_refresh and self.refresh_timer:
                 self.refresh_timer.stop()
                 self.refresh_timer = None
@@ -726,6 +880,98 @@ class MainWindow(QMainWindow):
                 # Reload scripts after a delay
                 QTimer.singleShot(1000, self._load_scripts)
 
+    def _scripts_key_press_event(self, event):
+        """Handle key press events in the scripts table.
+
+        Args:
+            event: The key press event
+        """
+        # Store the original event handler
+        original_handler = self.scripts_table.keyPressEvent
+
+        # Handle Enter/Return key to run the selected script
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            script_name = self._get_selected_script()
+            if script_name:
+                self._on_run_script()
+                return
+
+        # Handle Delete key to remove the selected script
+        elif event.key() == Qt.Key_Delete:
+            script_name = self._get_selected_script()
+            if script_name:
+                self._on_remove_script()
+                return
+
+        # Handle F2 key to edit the selected script
+        elif event.key() == Qt.Key_F2:
+            script_name = self._get_selected_script()
+            if script_name:
+                self._on_edit_script()
+                return
+
+        # Call the original event handler for other keys
+        original_handler(event)
+
+    def _on_scripts_context_menu(self, pos):
+        """Show context menu for scripts table.
+
+        Args:
+            pos: The position where the context menu was requested
+        """
+        # Get the global position
+        global_pos = self.scripts_table.viewport().mapToGlobal(pos)
+
+        # Get the item at position
+        item = self.scripts_table.itemAt(pos)
+        if not item:
+            return
+
+        # Get the script name
+        row = item.row()
+        script_name = self.scripts_table.item(row, 0).text()
+
+        # Create context menu
+        menu = QMenu(self)
+
+        # Add actions
+        run_action = QAction("Run", self)
+        run_action.triggered.connect(lambda: self._on_run_script())
+        menu.addAction(run_action)
+
+        edit_action = QAction("Edit", self)
+        edit_action.triggered.connect(lambda: self._on_edit_script())
+        menu.addAction(edit_action)
+
+        shortcut_action = QAction("Set Shortcut", self)
+        shortcut_action.triggered.connect(lambda: self._on_set_shortcut())
+        menu.addAction(shortcut_action)
+
+        rule_action = QAction("Set Window Rule", self)
+        rule_action.triggered.connect(lambda: self._on_set_window_rule())
+        menu.addAction(rule_action)
+
+        menu.addSeparator()
+
+        remove_action = QAction("Remove", self)
+        remove_action.triggered.connect(lambda: self._on_remove_script())
+        menu.addAction(remove_action)
+
+        # Show menu
+        menu.exec_(global_pos)
+
+    def quit_application(self):
+        """Completely quit the application regardless of tray settings."""
+        # Clean up
+        if self.refresh_timer:
+            self.refresh_timer.stop()
+
+        if self.tray_icon:
+            self.tray_icon.hide()
+
+        # Actually quit the application
+        QApplication.quit()
+
     def closeEvent(self, event):
         """Handle window close event.
 
@@ -748,11 +994,5 @@ class MainWindow(QMainWindow):
                 2000
             )
         else:
-            # Clean up and close
-            if self.refresh_timer:
-                self.refresh_timer.stop()
-
-            if self.tray_icon:
-                self.tray_icon.hide()
-
-            event.accept()
+            # Actually quit the application
+            self.quit_application()
