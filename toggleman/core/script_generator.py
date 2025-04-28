@@ -59,6 +59,9 @@ class ScriptGenerator:
             # Create template object
             template = Template(template_content)
 
+            # Get home directory
+            home_dir = os.path.expanduser("~")
+
             # Prepare substitution variables
             script_vars = {
                 # Required variables
@@ -75,8 +78,9 @@ class ScriptGenerator:
                 "DEBUG": "true" if script_config.get("debug", False) else "false",
                 "NOTIFICATIONS": "true" if script_config.get("notifications", True) else "false",
 
-                # Environment variables
-                "HOME": os.path.expanduser("~")
+                # Environment variables and computed paths
+                "HOME": home_dir,
+                "TRAY_ICON_DIR": f"{home_dir}/.cache/toggle_app"
             }
 
             # Substitute variables in template
@@ -185,7 +189,7 @@ readonly CHROME_PROFILE="${CHROME_PROFILE}"
 readonly APP_ID="${APP_ID}"
 readonly TRAY_ICON_PATH="${TRAY_ICON_PATH}"
 readonly TRAY_NAME="${TRAY_NAME}"
-readonly TRAY_ICON_DIR="$HOME/.cache/toggle_app"
+readonly TRAY_ICON_DIR="${TRAY_ICON_DIR}"
 
 # Debug settings
 DEBUG="${DEBUG}"
