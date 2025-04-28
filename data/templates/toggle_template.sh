@@ -2,20 +2,24 @@
 # Generated Toggle Script by Toggleman
 # Do not edit directly - use Toggleman to modify this script
 
+# Error handling
+set -o pipefail
+trap 'echo "Error on line $LINENO"; exit 1' ERR
+
 # Configuration
 readonly APP_COMMAND="${APP_COMMAND}"
 readonly APP_PROCESS="${APP_PROCESS}"
 readonly WINDOW_CLASS="${WINDOW_CLASS}"
 readonly CHROME_EXEC="${CHROME_EXEC}"
-readonly CHROME_PROFILE="${CHROME_PROFILE}"
+readonly CHROME_PROFILE="${CHROME_PROFILE:-Default}"
 readonly APP_ID="${APP_ID}"
 readonly TRAY_ICON_PATH="${TRAY_ICON_PATH}"
 readonly TRAY_NAME="${TRAY_NAME}"
-readonly TRAY_ICON_DIR="$HOME/.cache/toggle_app"
+readonly TRAY_ICON_DIR="${TRAY_ICON_DIR:-$HOME/.cache/toggle_app}"
 
 # Debug settings
-DEBUG="${DEBUG}"
-NOTIFICATIONS="${NOTIFICATIONS}"
+DEBUG="${DEBUG:-false}"
+NOTIFICATIONS="${NOTIFICATIONS:-true}"
 
 # Error codes
 readonly E_GENERAL=1
@@ -23,7 +27,9 @@ readonly E_DEPS_MISSING=2
 readonly E_APP_LAUNCH=3
 
 # Make sure the cache directory exists
-mkdir -p "$TRAY_ICON_DIR"
+mkdir -p "$TRAY_ICON_DIR" 2>/dev/null || {
+    echo "Warning: Could not create cache directory $TRAY_ICON_DIR"
+}
 
 # Function for debug logging
 log_debug() {
@@ -40,32 +46,48 @@ check_dependencies() {
         missing_deps+=("qdbus")
     fi
 
+    # For X11 sessions, check for xdotool
+    if [ "$XDG_SESSION_TYPE" = "x11" ] && ! command -v xdotool &>/dev/null; then
+        log_debug "xdotool not found but might be useful on X11 sessions"
+    fi
+
     if [ ${#missing_deps[@]} -gt 0 ]; then
         echo "Error: Missing required dependencies: ${missing_deps[*]}"
         echo "Please install them with: sudo pacman -S ${missing_deps[*]}"
         exit $E_DEPS_MISSING
     fi
+
+    log_debug "All dependencies satisfied"
 }
 
 # Function to find all windows matching our target class
 find_windows() {
     log_debug "Searching for windows with class: $WINDOW_CLASS"
 
-    # Try KDE-specific method first (for Wayland)
-    local window_list
-    window_list=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowList 2>/dev/null)
-
     local matching_windows=""
 
-    for win_id in $window_list; do
-        local win_class
-        win_class=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowInfo "$win_id" | grep "resourceClass" | cut -d '"' -f 2)
+    # Determine window management system
+    if [ "$XDG_SESSION_TYPE" = "wayland" ] || command -v qdbus &>/dev/null; then
+        log_debug "Using KWin/Wayland method for window detection"
 
-        if [[ "$win_class" == "$WINDOW_CLASS" ]]; then
-            matching_windows="$matching_windows $win_id"
-            log_debug "Found matching window ID: $win_id"
+        # Try KDE-specific method first (for Wayland)
+        if qdbus org.kde.KWin /KWin &>/dev/null; then
+            local window_list
+            window_list=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowList 2>/dev/null)
+
+            for win_id in $window_list; do
+                local win_class
+                win_class=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowInfo "$win_id" | grep "resourceClass" | cut -d '"' -f 2)
+
+                if [[ "$win_class" == "$WINDOW_CLASS" ]]; then
+                    matching_windows="$matching_windows $win_id"
+                    log_debug "Found matching window ID: $win_id with class $win_class"
+                fi
+            done
+        else
+            log_debug "KWin DBus interface not available"
         fi
-    done
+    fi
 
     # Fallback to X11 method if no windows found and xdotool is available
     if [ -z "$matching_windows" ] && command -v xdotool &>/dev/null; then
@@ -80,6 +102,22 @@ find_windows() {
         fi
     fi
 
+    # For Chrome apps on Wayland, try a more aggressive approach
+    if [ -z "$matching_windows" ] && [ -n "$APP_ID" ] && [ "$XDG_SESSION_TYPE" = "wayland" ]; then
+        log_debug "Trying special Chrome app detection method for Wayland..."
+        for win_id in $(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowList 2>/dev/null); do
+            local win_class win_title
+            win_class=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowInfo "$win_id" | grep "resourceClass" | cut -d '"' -f 2)
+            win_title=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowInfo "$win_id" | grep "caption" | cut -d '"' -f 2)
+
+            # Check for Chrome or Chrome app
+            if [[ "$win_class" == *"chrome"* ]] || [[ "$win_class" == *"crx"* ]]; then
+                matching_windows="$matching_windows $win_id"
+                log_debug "Found potential Chrome app window: $win_id, class=$win_class, title=$win_title"
+            fi
+        done
+    fi
+
     echo "$matching_windows"
 }
 
@@ -88,12 +126,14 @@ is_minimized() {
     local win_id=$1
 
     # Try KDE-specific method first (works on Wayland)
-    local kde_state
-    kde_state=$(qdbus org.kde.KWin /KWin org.kde.KWin.isMinimized "$win_id" 2>/dev/null)
+    if qdbus org.kde.KWin /KWin &>/dev/null; then
+        local kde_state
+        kde_state=$(qdbus org.kde.KWin /KWin org.kde.KWin.isMinimized "$win_id" 2>/dev/null)
 
-    if [ "$kde_state" = "true" ]; then
-        log_debug "Window $win_id is minimized (KDE method)"
-        return 0  # Window is minimized
+        if [ "$kde_state" = "true" ]; then
+            log_debug "Window $win_id is minimized (KDE method)"
+            return 0  # Window is minimized
+        fi
     fi
 
     # Fallback to X11 method if KDE method failed and xprop is available
@@ -119,8 +159,10 @@ activate_window() {
     log_debug "Activating window $win_id"
 
     # Try KDE-specific method first (for Wayland)
-    qdbus org.kde.KWin /KWin org.kde.KWin.unminimizeWindow "$win_id" 2>/dev/null
-    qdbus org.kde.KWin /KWin org.kde.KWin.forceActiveWindow "$win_id" 2>/dev/null
+    if qdbus org.kde.KWin /KWin &>/dev/null; then
+        qdbus org.kde.KWin /KWin org.kde.KWin.unminimizeWindow "$win_id" 2>/dev/null
+        qdbus org.kde.KWin /KWin org.kde.KWin.forceActiveWindow "$win_id" 2>/dev/null
+    fi
 
     # Fallback to X11 method if xdotool is available
     if command -v xdotool &>/dev/null; then
@@ -137,7 +179,9 @@ minimize_window() {
     log_debug "Minimizing window $win_id"
 
     # Try KDE-specific method first (for Wayland)
-    qdbus org.kde.KWin /KWin org.kde.KWin.minimizeWindow "$win_id" 2>/dev/null
+    if qdbus org.kde.KWin /KWin &>/dev/null; then
+        qdbus org.kde.KWin /KWin org.kde.KWin.minimizeWindow "$win_id" 2>/dev/null
+    fi
 
     # Fallback to X11 method if xdotool is available
     if command -v xdotool &>/dev/null; then
@@ -149,7 +193,7 @@ minimize_window() {
 # Function to check if app is running
 is_app_running() {
     local pids
-    pids=$(pgrep -f "$APP_PROCESS")
+    pids=$(pgrep -f "$APP_PROCESS" 2>/dev/null || echo "")
 
     if [ -n "$pids" ]; then
         log_debug "App is running with PIDs: $pids"
@@ -163,16 +207,18 @@ is_app_running() {
 # Function to check if a process is still starting up
 is_starting_up() {
     local pids
-    pids=$(pgrep -f "$APP_PROCESS")
+    pids=$(pgrep -f "$APP_PROCESS" 2>/dev/null || echo "")
 
     if [ -n "$pids" ]; then
         for pid in $pids; do
-            local start_time
-            start_time=$(ps -o etimes= -p "$pid")
+            if [ -n "$pid" ] && [ "$pid" -gt 0 ]; then
+                local start_time
+                start_time=$(ps -o etimes= -p "$pid" 2>/dev/null || echo "999")
 
-            if [ "$start_time" -lt 5 ]; then
-                log_debug "App is starting up (PID $pid, started $start_time seconds ago)"
-                return 0  # True, it's starting up
+                if [ "$start_time" -lt 5 ]; then
+                    log_debug "App is starting up (PID $pid, started $start_time seconds ago)"
+                    return 0  # True, it's starting up
+                fi
             fi
         done
     fi
@@ -190,23 +236,30 @@ get_app_icon() {
         log_debug "No icon path specified, looking for suitable icon"
 
         # Create cache directory if it doesn't exist
-        mkdir -p "$TRAY_ICON_DIR"
+        mkdir -p "$TRAY_ICON_DIR" 2>/dev/null || {
+            log_debug "Could not create cache directory $TRAY_ICON_DIR"
+        }
 
         # Look for the icon in Chrome's app data if this is a Chrome app
         if [ -n "$APP_ID" ] && [ -n "$CHROME_PROFILE" ]; then
             local chrome_app_dir="$HOME/.config/google-chrome/$CHROME_PROFILE/Web Applications"
 
-            # Try to find the icon file
-            local found_icon
-            found_icon=$(find "$chrome_app_dir" -path "*$APP_ID*" -name "*.png" | sort -r | head -n 1)
+            if [ -d "$chrome_app_dir" ]; then
+                # Try to find the icon file
+                local found_icon
+                found_icon=$(find "$chrome_app_dir" -path "*$APP_ID*" -name "*.png" 2>/dev/null | sort -r | head -n 1)
 
-            if [ -n "$found_icon" ]; then
-                # Copy the icon to our cache directory
-                local icon_name
-                icon_name=$(basename "$found_icon")
-                cp "$found_icon" "$TRAY_ICON_DIR/$icon_name"
-                icon_path="$TRAY_ICON_DIR/$icon_name"
-                log_debug "Found and using Chrome app icon: $icon_path"
+                if [ -n "$found_icon" ]; then
+                    # Copy the icon to our cache directory
+                    local icon_name
+                    icon_name=$(basename "$found_icon")
+                    if cp "$found_icon" "$TRAY_ICON_DIR/$icon_name" 2>/dev/null; then
+                        icon_path="$TRAY_ICON_DIR/$icon_name"
+                        log_debug "Found and using Chrome app icon: $icon_path"
+                    fi
+                fi
+            else
+                log_debug "Chrome app directory not found at $chrome_app_dir"
             fi
         fi
 
@@ -252,17 +305,21 @@ apply_window_properties() {
     log_debug "Applying window properties to window $win_id"
 
     # Force apply window rules using KWin
-    qdbus org.kde.KWin /KWin org.kde.KWin.setMaximize "$win_id" true true 2>/dev/null
+    if qdbus org.kde.KWin /KWin &>/dev/null; then
+        qdbus org.kde.KWin /KWin org.kde.KWin.setMaximize "$win_id" true true 2>/dev/null
 
-    # Try to apply X11 properties if running on X11
-    if [ "$XDG_SESSION_TYPE" = "x11" ] && command -v xprop &>/dev/null; then
-        log_debug "Applying X11 window properties"
-        # Apply the "skip taskbar" property
-        xprop -id "$win_id" -f _NET_WM_STATE 32a -set _NET_WM_STATE _NET_WM_STATE_SKIP_TASKBAR 2>/dev/null
+        # Try to apply X11 properties if running on X11
+        if [ "$XDG_SESSION_TYPE" = "x11" ] && command -v xprop &>/dev/null; then
+            log_debug "Applying X11 window properties"
+            # Apply the "skip taskbar" property
+            xprop -id "$win_id" -f _NET_WM_STATE 32a -set _NET_WM_STATE _NET_WM_STATE_SKIP_TASKBAR 2>/dev/null
+        fi
+
+        # Reconfigure KWin to ensure rules are applied
+        qdbus org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null
+    else
+        log_debug "KWin DBus interface not available, skipping window property application"
     fi
-
-    # Reconfigure KWin to ensure rules are applied
-    qdbus org.kde.KWin /KWin org.kde.KWin.reconfigure 2>/dev/null
 }
 
 # Main function

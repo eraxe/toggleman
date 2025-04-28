@@ -54,20 +54,64 @@ class KWinManager:
         command_string = script_path
 
         try:
-            # Check if we have DBus connection
-            bus = dbus.SessionBus()
-            kwin = bus.get_object("org.kde.kglobalaccel", "/kglobalaccel")
-            kglobalaccel = dbus.Interface(kwin, "org.kde.KGlobalAccel")
+            # Method 1: Direct DBus method
+            try:
+                bus = dbus.SessionBus()
+                kglobalaccel = bus.get_object("org.kde.kglobalaccel", "/kglobalaccel")
+                kglobalaccel_iface = dbus.Interface(kglobalaccel, "org.kde.KGlobalAccel")
 
-            # First, check if the shortcut already exists and remove it
-            self._remove_shortcut(shortcut_name)
+                # First, check if the shortcut already exists and remove it
+                component = "toggleman"
+                context = ""
+                action_id = f"toggle_{script_name}"
+                key_sequence = [shortcut]
 
-            # Create the shortcut using kwriteconfig5
+                # This is the preferred Plasma 5 approach, check if it works
+                try:
+                    kglobalaccel_iface.setShortcut(component, action_id, key_sequence, context, {})
+                    logger.info(f"Set shortcut via DBus: {shortcut} for {script_name}")
+
+                    # Update the script configuration
+                    script_config["kwin_shortcut"] = shortcut
+                    self.config_manager.save_script(script_name, script_config)
+
+                    return True, f"Set shortcut '{shortcut}' for toggle script '{script_name}'"
+                except Exception as e:
+                    logger.warning(f"DBus shortcut method failed: {e}, trying khotkeys method")
+            except Exception as e:
+                logger.warning(f"Could not connect to KGlobalAccel: {e}, trying khotkeys method")
+
+            # Method 2: kwriteconfig method
             self._create_shortcut_with_kwriteconfig(shortcut_name, command_string, shortcut)
 
             # Update the script configuration
             script_config["kwin_shortcut"] = shortcut
             self.config_manager.save_script(script_name, script_config)
+
+            # As a backup measure, also try to use qdbus
+            try:
+                subprocess.run([
+                    "qdbus", "org.kde.kglobalaccel", "/kglobalaccel",
+                    "org.kde.KGlobalAccel.setShortcut",
+                    f"toggleman: {script_name}",
+                    shortcut,
+                    "default",
+                    "default",
+                    "toggle"
+                ], check=False)
+            except Exception:
+                pass  # Ignore errors, this is just a backup method
+
+            # Method 3: Try using khotkeys directly (more compatible with older KDE versions)
+            try:
+                script_cmd = f"sh -c '{script_path}'"
+                subprocess.run([
+                    "khotkeys", "--command", script_cmd,
+                    "--shortcut", shortcut,
+                    "--title", shortcut_name
+                ], check=False)
+            except Exception:
+                pass  # Ignore errors, this is just a backup method
 
             return True, f"Set shortcut '{shortcut}' for toggle script '{script_name}'"
 
@@ -91,15 +135,40 @@ class KWinManager:
 
         # Create shortcut name
         shortcut_name = f"Toggle {script_name}"
+        config_name = shortcut_name.replace(" ", "_").lower()
 
         try:
-            # Remove the shortcut
-            self._remove_shortcut(shortcut_name)
+            # Use kwriteconfig5 to disable the shortcut
+            kwrite_cmd = "kwriteconfig5"
+            if not self._is_command_available(kwrite_cmd):
+                kwrite_cmd = "kwriteconfig"
+
+            subprocess.run(
+                [kwrite_cmd, "--file", "khotkeysrc", "--group", f"Data_1_{config_name}", "--key", "Enabled", "false"])
+
+            # Try to use qdbus to remove shortcut as well
+            try:
+                bus = dbus.SessionBus()
+                kglobalaccel = bus.get_object("org.kde.kglobalaccel", "/kglobalaccel")
+                kglobalaccel_iface = dbus.Interface(kglobalaccel, "org.kde.KGlobalAccel")
+
+                component = "toggleman"
+                action_id = f"toggle_{script_name}"
+                key_sequence = []  # Empty sequence to clear
+                context = ""
+
+                kglobalaccel_iface.setShortcut(component, action_id, key_sequence, context, {})
+            except Exception:
+                pass  # Ignore errors, this is just a backup method
+
+            # Force reload of shortcuts
+            subprocess.run(["kquitapp5", "kglobalaccel"], check=False)
+            time.sleep(1)  # Wait for process to terminate
+            subprocess.run(["kglobalaccel5"], check=False)
 
             # Update the script configuration
             if "kwin_shortcut" in script_config:
                 del script_config["kwin_shortcut"]
-
             self.config_manager.save_script(script_name, script_config)
 
             return True, f"Removed shortcut for toggle script '{script_name}'"
@@ -146,17 +215,33 @@ class KWinManager:
             return False, "Window class not defined in script configuration"
 
         try:
-            # Launch KWin window rules with capture first
-            window_capture_cmd = ["kcmshell5", "kwinrules"]
-            capture_process = subprocess.Popen(window_capture_cmd)
+            # First check if kcmshell5 is available
+            if self._is_command_available("kcmshell5"):
+                # Launch KWin window rules with capture first
+                window_capture_cmd = ["kcmshell5", "kwinrules"]
+                capture_process = subprocess.Popen(window_capture_cmd)
+            else:
+                # Try the newer kcmshell6 on newer KDE versions
+                window_capture_cmd = ["kcmshell6", "kwinrules"]
+                capture_process = subprocess.Popen(window_capture_cmd)
 
             # Wait a bit for the dialog to open
             time.sleep(2)
 
-            # TODO: Find a more reliable way to pre-fill the window class
-            # Currently, this opens the window rules dialog, but doesn't pre-fill the window class
+            # Alternative method: use systemsettings
+            if capture_process.poll() is not None:  # Process exited already
+                # Try using systemsettings
+                try:
+                    subprocess.Popen(["systemsettings5", "kcm_kwinrules"])
+                except Exception:
+                    # Try newer systemsettings
+                    try:
+                        subprocess.Popen(["systemsettings", "kcm_kwinrules"])
+                    except Exception as e:
+                        logger.error(f"Error launching system settings: {e}")
 
-            return True, f"Opened window rules editor for '{script_name}'"
+            # Display a message to the user
+            return True, f"Opened window rules editor. Please create a rule for window class: {window_class}"
 
         except Exception as e:
             logger.error(f"Error opening window rules for {script_name}: {e}")
@@ -173,66 +258,82 @@ class KWinManager:
         # Sanitize shortcut name for config
         config_name = shortcut_name.replace(" ", "_").lower()
 
-        # Use kwriteconfig5 to set shortcut
-        subprocess.run(
-            ["kwriteconfig5", "--file", "khotkeysrc", "--group", "Data_1", "--key", "Comment", "Toggleman Shortcuts"])
-        subprocess.run(["kwriteconfig5", "--file", "khotkeysrc", "--group", "Data_1", "--key", "Enabled", "true"])
-        subprocess.run(
-            ["kwriteconfig5", "--file", "khotkeysrc", "--group", "Data_1", "--key", "Name", "Toggleman Shortcuts"])
-        subprocess.run(["kwriteconfig5", "--file", "khotkeysrc", "--group", "Data_1", "--key", "Type", "GENERIC"])
+        # Try to determine which kwriteconfig version to use
+        kwrite_cmd = "kwriteconfig5"
+        if not self._is_command_available(kwrite_cmd):
+            kwrite_cmd = "kwriteconfig"
+
+        # Find a unique index for this shortcut
+        try:
+            # Look for existing Data_X groups
+            result = subprocess.run(
+                ["grep", "-r", "Data_[0-9]", f"{os.path.expanduser('~')}/.config/khotkeysrc"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+
+            # Parse output to find the highest index
+            highest_index = 1
+            if result.returncode == 0:
+                import re
+                indices = re.findall(r'Data_(\d+)', result.stdout)
+                if indices:
+                    highest_index = max(map(int, indices)) + 1
+        except Exception:
+            highest_index = 1
+
+        data_group = f"Data_{highest_index}"
+        action_group = f"{data_group}_{config_name}"
+
+        # Use kwriteconfig to set shortcut
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", data_group, "--key", "Comment", "Toggleman Shortcuts"])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", data_group, "--key", "Enabled", "true"])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", data_group, "--key", "Name", "Toggleman Shortcuts"])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", data_group, "--key", "Type", "GENERIC"])
 
         # Create new group for the shortcut
-        subprocess.run(["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}", "--key", "Comment",
-                        shortcut_name])
-        subprocess.run(
-            ["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}", "--key", "Enabled", "true"])
-        subprocess.run(["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}", "--key", "Name",
-                        shortcut_name])
-        subprocess.run(["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}", "--key", "Type",
-                        "SIMPLE_ACTION_DATA"])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", action_group, "--key", "Comment", shortcut_name])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", action_group, "--key", "Enabled", "true"])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", action_group, "--key", "Name", shortcut_name])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", action_group, "--key", "Type", "SIMPLE_ACTION_DATA"])
 
         # Set the actual shortcut
-        subprocess.run(["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}Actions", "--key",
-                        "ActionsCount", "1"])
-        subprocess.run(
-            ["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}Actions0", "--key", "CommandURL",
-             command])
-        subprocess.run(
-            ["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}Actions0", "--key", "Type",
-             "COMMAND_URL"])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Actions", "--key", "ActionsCount", "1"])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Actions0", "--key", "CommandURL", command])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Actions0", "--key", "Type", "COMMAND_URL"])
 
         # Set the trigger
-        subprocess.run(
-            ["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}Triggers", "--key", "Comment",
-             "Simple_action"])
-        subprocess.run(["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}Triggers", "--key",
-                        "TriggersCount", "1"])
-        subprocess.run(
-            ["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}Triggers0", "--key", "Key",
-             keys])
-        subprocess.run(
-            ["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}Triggers0", "--key", "Type",
-             "SHORTCUT"])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Triggers", "--key", "Comment", "Simple_action"])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Triggers", "--key", "TriggersCount", "1"])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Triggers0", "--key", "Key", keys])
+        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Triggers0", "--key", "Type", "SHORTCUT"])
 
         # Force reload of shortcuts
-        subprocess.run(["kquitapp5", "kglobalaccel"])
-        time.sleep(1)  # Wait for process to terminate
-        subprocess.run(["kglobalaccel5"])
+        try:
+            subprocess.run(["kquitapp5", "kglobalaccel"], check=False)
+            time.sleep(1)  # Wait for process to terminate
+            subprocess.run(["kglobalaccel5"], check=False)
+        except Exception:
+            # Try alternate methods
+            try:
+                subprocess.run(["killall", "kglobalaccel5"], check=False)
+                time.sleep(1)
+                subprocess.run(["kglobalaccel5"], check=False)
+            except Exception:
+                pass
 
-    def _remove_shortcut(self, shortcut_name: str) -> None:
-        """Remove a custom shortcut.
+    def _is_command_available(self, command: str) -> bool:
+        """Check if a command is available in the PATH.
 
         Args:
-            shortcut_name: The name of the shortcut
+            command: The command to check
+
+        Returns:
+            True if the command is available, False otherwise
         """
-        # Sanitize shortcut name for config
-        config_name = shortcut_name.replace(" ", "_").lower()
-
-        # Use kwriteconfig5 to remove the shortcut
-        subprocess.run(
-            ["kwriteconfig5", "--file", "khotkeysrc", "--group", f"Data_1_{config_name}", "--key", "Enabled", "false"])
-
-        # Force reload of shortcuts
-        subprocess.run(["kquitapp5", "kglobalaccel"])
-        time.sleep(1)  # Wait for process to terminate
-        subprocess.run(["kglobalaccel5"])
+        try:
+            subprocess.run(["which", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return True
+        except Exception:
+            return False
