@@ -8,3 +8,4 @@ from toggleman.gui.main_window import MainWindow
 from toggleman.gui.settings_dialog import SettingsDialog
 from toggleman.gui.script_editor import ScriptEditorDialog
 from toggleman.gui.icon_selector import IconSelectorDialog
+from toggleman.gui.web_app_selector import WebAppSelectorDialog

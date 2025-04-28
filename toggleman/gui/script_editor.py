@@ -21,6 +21,8 @@ from PyQt5.QtCore import Qt, QSize, pyqtSignal, pyqtSlot
 from toggleman.core.config import ConfigManager
 from toggleman.core.toggle_manager import ToggleManager
 from toggleman.core.debug import get_logger
+from toggleman.core.web_app_detector import WebAppDetector, WebApp
+from toggleman.gui.web_app_selector import WebAppSelectorDialog
 from toggleman.gui.icon_selector import IconSelectorDialog
 
 logger = get_logger(__name__)
@@ -101,6 +103,12 @@ class ScriptEditorDialog(QDialog):
         capture_button = QPushButton("Capture")
         capture_button.clicked.connect(self._on_capture_window)
         capture_layout.addWidget(capture_button)
+
+        # Add scan web apps button
+        scan_button = QPushButton("Scan Web Apps...")
+        scan_button.setIcon(QIcon.fromTheme("applications-internet"))
+        scan_button.clicked.connect(self._on_scan_web_apps)
+        capture_layout.addWidget(scan_button)
 
         basic_form.addRow("Window Class:", capture_layout)
 
@@ -394,6 +402,66 @@ class ScriptEditorDialog(QDialog):
         finally:
             # Show this dialog again
             self.show()
+
+    def _on_scan_web_apps(self):
+        """Handle scanning for web apps."""
+        # Show scanning dialog
+        dialog = WebAppSelectorDialog(parent=self)
+
+        if dialog.exec_() == QDialog.Accepted:
+            # Get selected web app
+            web_app = dialog.get_selected_web_app()
+            if not web_app:
+                return
+
+            # Populate fields with web app data
+            self.name_edit.setText(web_app.name if not self.editing_mode else self.name_edit.text())
+            self.description_edit.setText(f"Web app toggle for {web_app.name}")
+
+            # Set application command based on browser
+            if web_app.browser in ["chrome", "chromium", "brave", "edge", "opera", "vivaldi"]:
+                # For Chrome-like browsers, use the app ID
+                self.chrome_exec_edit.setText(web_app.browser_path)
+                self.chrome_profile_edit.setText(web_app.profile)
+                self.app_id_edit.setText(web_app.app_id)
+
+                # Set app command to use the browser with app-id
+                self.app_command_edit.setText(f"{web_app.browser_path} --profile-directory=\"{web_app.profile}\" --app-id={web_app.app_id}")
+
+                # Set app process pattern
+                self.app_process_edit.setText(f"{os.path.basename(web_app.browser_path)}.*--app-id={web_app.app_id}")
+
+            elif web_app.browser in ["firefox", "librewolf"]:
+                # For Firefox, use the URL directly
+                firefox_app_cmd = f"{web_app.browser_path} -P \"{web_app.profile}\" --new-window {web_app.url}"
+                self.app_command_edit.setText(firefox_app_cmd)
+
+                # Set app process pattern
+                self.app_process_edit.setText(f"{os.path.basename(web_app.browser_path)}.*{web_app.profile}.*{web_app.url}")
+
+            # Set window class
+            self.window_class_edit.setText(web_app.window_class)
+
+            # Set icon path if available
+            if web_app.icon_path and os.path.exists(web_app.icon_path):
+                self.icon_path_edit.setText(web_app.icon_path)
+
+            # Set script path if empty
+            if not self.script_path_edit.text():
+                default_dir = self.config_manager.get_setting("general", "default_script_dir",
+                                                           str(os.path.expanduser("~/.local/bin")))
+                sanitized_name = "".join(c for c in web_app.name if c.isalnum() or c in ["-", "_"]).lower()
+                self.script_path_edit.setText(os.path.join(default_dir, f"toggle-{sanitized_name}.sh"))
+
+            # Set tray name if empty
+            if not self.tray_name_edit.text():
+                self.tray_name_edit.setText(f"{web_app.name} Toggle")
+
+            QMessageBox.information(
+                self,
+                "Web App Detected",
+                f"Successfully populated fields from {web_app.browser.capitalize()} web app: {web_app.name}"
+            )
 
     def _on_choose_icon(self):
         """Handle choosing an icon."""
