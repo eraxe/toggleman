@@ -75,15 +75,35 @@ find_windows() {
             local window_list
             window_list=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowList 2>/dev/null)
 
+            # First try exact matching
             for win_id in $window_list; do
                 local win_class
                 win_class=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowInfo "$win_id" | grep "resourceClass" | cut -d '"' -f 2)
-
+                
+                log_debug "Window $win_id has class $win_class"
+                
                 if [[ "$win_class" == "$WINDOW_CLASS" ]]; then
                     matching_windows="$matching_windows $win_id"
-                    log_debug "Found matching window ID: $win_id with class $win_class"
+                    log_debug "Found exact matching window ID: $win_id with class $win_class"
                 fi
             done
+
+            # Special handling for Chrome apps if no exact match and we have an APP_ID
+            if [ -z "$matching_windows" ] && [ -n "$APP_ID" ]; then
+                log_debug "No exact match found. Looking for Chrome app with APP_ID: $APP_ID"
+                
+                for win_id in $window_list; do
+                    local win_class win_title
+                    win_class=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowInfo "$win_id" | grep "resourceClass" | cut -d '"' -f 2)
+                    win_title=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowInfo "$win_id" | grep "caption" | cut -d '"' -f 2)
+                    
+                    # Check for this specific Chrome app
+                    if [[ "$win_class" == "crx_"*"$APP_ID" ]] || [[ "$win_class" == "chrome_app_"*"$APP_ID" ]]; then
+                        matching_windows="$matching_windows $win_id"
+                        log_debug "Found Chrome app window: $win_id, class=$win_class, title=$win_title"
+                    fi
+                done
+            fi
         else
             log_debug "KWin DBus interface not available"
         fi
@@ -94,28 +114,24 @@ find_windows() {
         log_debug "No windows found with KDE method, trying xdotool..."
         matching_windows=$(xdotool search --class "$WINDOW_CLASS" 2>/dev/null)
 
+        # If still not found and we have an APP_ID, try to find by app ID
+        if [ -z "$matching_windows" ] && [ -n "$APP_ID" ]; then
+            log_debug "Trying to find Chrome app by APP_ID with xdotool..."
+            matching_windows=$(xdotool search --class "crx_$APP_ID" 2>/dev/null)
+        fi
+
         # If still not found, try a more flexible approach
         if [ -z "$matching_windows" ]; then
             log_debug "Trying more flexible xdotool approach..."
             matching_windows=$(xdotool search --name ".*" 2>/dev/null | \
                           xargs -I{} sh -c "xprop -id {} WM_CLASS 2>/dev/null | grep -i \"$WINDOW_CLASS\" > /dev/null && echo {}" || echo "")
-        fi
-    fi
 
-    # For Chrome apps on Wayland, try a more aggressive approach
-    if [ -z "$matching_windows" ] && [ -n "$APP_ID" ] && [ "$XDG_SESSION_TYPE" = "wayland" ]; then
-        log_debug "Trying special Chrome app detection method for Wayland..."
-        for win_id in $(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowList 2>/dev/null); do
-            local win_class win_title
-            win_class=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowInfo "$win_id" | grep "resourceClass" | cut -d '"' -f 2)
-            win_title=$(qdbus org.kde.KWin /KWin org.kde.KWin.getWindowInfo "$win_id" | grep "caption" | cut -d '"' -f 2)
-
-            # Check for Chrome or Chrome app
-            if [[ "$win_class" == *"chrome"* ]] || [[ "$win_class" == *"crx"* ]]; then
-                matching_windows="$matching_windows $win_id"
-                log_debug "Found potential Chrome app window: $win_id, class=$win_class, title=$win_title"
+            # If we have an APP_ID and still no match, try by APP_ID
+            if [ -z "$matching_windows" ] && [ -n "$APP_ID" ]; then
+                matching_windows=$(xdotool search --name ".*" 2>/dev/null | \
+                              xargs -I{} sh -c "xprop -id {} WM_CLASS 2>/dev/null | grep -i \"$APP_ID\" > /dev/null && echo {}" || echo "")
             fi
-        done
+        fi
     fi
 
     echo "$matching_windows"
@@ -162,6 +178,9 @@ activate_window() {
     if qdbus org.kde.KWin /KWin &>/dev/null; then
         qdbus org.kde.KWin /KWin org.kde.KWin.unminimizeWindow "$win_id" 2>/dev/null
         qdbus org.kde.KWin /KWin org.kde.KWin.forceActiveWindow "$win_id" 2>/dev/null
+
+        # Wait a moment for the window to be activated
+        sleep 0.5
     fi
 
     # Fallback to X11 method if xdotool is available
@@ -311,8 +330,9 @@ apply_window_properties() {
         # Try to apply X11 properties if running on X11
         if [ "$XDG_SESSION_TYPE" = "x11" ] && command -v xprop &>/dev/null; then
             log_debug "Applying X11 window properties"
-            # Apply the "skip taskbar" property
-            xprop -id "$win_id" -f _NET_WM_STATE 32a -set _NET_WM_STATE _NET_WM_STATE_SKIP_TASKBAR 2>/dev/null
+            # Apply the "skip taskbar" property if desired
+            # Uncomment if you want this behavior
+            # xprop -id "$win_id" -f _NET_WM_STATE 32a -set _NET_WM_STATE _NET_WM_STATE_SKIP_TASKBAR 2>/dev/null
         fi
 
         # Reconfigure KWin to ensure rules are applied

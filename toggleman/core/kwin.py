@@ -9,6 +9,7 @@ import os
 import subprocess
 import tempfile
 import time
+import shlex
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 import dbus
@@ -28,13 +29,44 @@ class KWinManager:
             config_manager: The configuration manager instance
         """
         self.config_manager = config_manager
+        self._detect_kde_tools()
+
+    def _detect_kde_tools(self):
+        """Detect available KDE tools."""
+        self.kde_tools = {}
+        
+        # Check for kcmshell versions
+        for tool in ["kcmshell5", "kcmshell6"]:
+            if self._is_command_available(tool):
+                self.kde_tools["kcmshell"] = tool
+                break
+                
+        # Check for systemsettings versions
+        for tool in ["systemsettings5", "systemsettings"]:
+            if self._is_command_available(tool):
+                self.kde_tools["systemsettings"] = tool
+                break
+                
+        # Check for kmenuedit versions
+        for tool in ["kmenuedit", "kmenuedit5"]:
+            if self._is_command_available(tool):
+                self.kde_tools["kmenuedit"] = tool
+                break
+                
+        # Check for shortcut tools
+        for tool in ["kde-open5", "kde-open", "xdg-open"]:
+            if self._is_command_available(tool):
+                self.kde_tools["opener"] = tool
+                break
+                
+        logger.debug(f"Detected KDE tools: {self.kde_tools}")
 
     def set_shortcut(self, script_name: str, shortcut: str) -> Tuple[bool, str]:
-        """Set a KWin keyboard shortcut for a toggle script.
+        """Open KDE's keyboard shortcut editor to set a shortcut for a toggle script.
 
         Args:
             script_name: The name of the toggle script
-            shortcut: The shortcut key sequence (e.g., "Meta+Alt+C")
+            shortcut: The shortcut key sequence (e.g., "Meta+Alt+C") - used as suggestion
 
         Returns:
             Tuple of (success, message)
@@ -49,75 +81,79 @@ class KWinManager:
         if not script_path or not os.path.exists(script_path):
             return False, f"Script file not found at {script_path}"
 
-        # Create shortcut name
-        shortcut_name = f"Toggle {script_name}"
-        command_string = script_path
+        # Update the script configuration with the suggested shortcut
+        # (The user will need to actually set it in KDE's UI)
+        script_config["kwin_shortcut"] = shortcut
+        self.config_manager.save_script(script_name, script_config)
 
+        # Open KDE's shortcut editor
         try:
-            # Method 1: Direct DBus method
-            try:
-                bus = dbus.SessionBus()
-                kglobalaccel = bus.get_object("org.kde.kglobalaccel", "/kglobalaccel")
-                kglobalaccel_iface = dbus.Interface(kglobalaccel, "org.kde.KGlobalAccel")
-
-                # First, check if the shortcut already exists and remove it
-                component = "toggleman"
-                context = ""
-                action_id = f"toggle_{script_name}"
-                key_sequence = [shortcut]
-
-                # This is the preferred Plasma 5 approach, check if it works
+            # Try different methods to open the shortcut editor
+            opened = False
+            
+            # Method 1: Try KDE's Custom Shortcuts module
+            if "kcmshell" in self.kde_tools:
+                logger.debug(f"Opening custom shortcuts with {self.kde_tools['kcmshell']}")
                 try:
-                    kglobalaccel_iface.setShortcut(component, action_id, key_sequence, context, {})
-                    logger.info(f"Set shortcut via DBus: {shortcut} for {script_name}")
-
-                    # Update the script configuration
-                    script_config["kwin_shortcut"] = shortcut
-                    self.config_manager.save_script(script_name, script_config)
-
-                    return True, f"Set shortcut '{shortcut}' for toggle script '{script_name}'"
+                    subprocess.Popen([self.kde_tools["kcmshell"], "kcm_keys"])
+                    opened = True
                 except Exception as e:
-                    logger.warning(f"DBus shortcut method failed: {e}, trying khotkeys method")
-            except Exception as e:
-                logger.warning(f"Could not connect to KGlobalAccel: {e}, trying khotkeys method")
-
-            # Method 2: kwriteconfig method
-            self._create_shortcut_with_kwriteconfig(shortcut_name, command_string, shortcut)
-
-            # Update the script configuration
-            script_config["kwin_shortcut"] = shortcut
-            self.config_manager.save_script(script_name, script_config)
-
-            # As a backup measure, also try to use qdbus
-            try:
-                subprocess.run([
-                    "qdbus", "org.kde.kglobalaccel", "/kglobalaccel",
-                    "org.kde.KGlobalAccel.setShortcut",
-                    f"toggleman: {script_name}",
-                    shortcut,
-                    "default",
-                    "default",
-                    "toggle"
-                ], check=False)
-            except Exception:
-                pass  # Ignore errors, this is just a backup method
-
-            # Method 3: Try using khotkeys directly (more compatible with older KDE versions)
-            try:
-                script_cmd = f"sh -c '{script_path}'"
-                subprocess.run([
-                    "khotkeys", "--command", script_cmd,
-                    "--shortcut", shortcut,
-                    "--title", shortcut_name
-                ], check=False)
-            except Exception:
-                pass  # Ignore errors, this is just a backup method
-
-            return True, f"Set shortcut '{shortcut}' for toggle script '{script_name}'"
+                    logger.warning(f"Error opening custom shortcuts with kcmshell: {e}")
+            
+            # Method 2: Try systemsettings
+            if not opened and "systemsettings" in self.kde_tools:
+                logger.debug(f"Opening system settings with {self.kde_tools['systemsettings']}")
+                try:
+                    if self.kde_tools["systemsettings"] == "systemsettings5":
+                        subprocess.Popen([self.kde_tools["systemsettings"], "keys"])
+                    else:
+                        subprocess.Popen([self.kde_tools["systemsettings"], "--section=shortcuts"])
+                    opened = True
+                except Exception as e:
+                    logger.warning(f"Error opening system settings: {e}")
+            
+            # Method 3: Use xdg-open or kde-open to open the settings URL
+            if not opened and "opener" in self.kde_tools:
+                logger.debug(f"Opening shortcuts with {self.kde_tools['opener']}")
+                try:
+                    subprocess.Popen([self.kde_tools["opener"], "settings://shortcuts"])
+                    opened = True
+                except Exception as e:
+                    logger.warning(f"Error opening shortcuts with opener: {e}")
+            
+            if not opened:
+                # Last resort: Try a direct command
+                logger.debug("Trying direct command to open shortcuts")
+                try:
+                    subprocess.Popen(["systemsettings5", "keys"])
+                    opened = True
+                except Exception:
+                    try:
+                        subprocess.Popen(["systemsettings", "--section=shortcuts"])
+                        opened = True
+                    except Exception as e:
+                        logger.warning(f"Error opening shortcuts with direct command: {e}")
+            
+            if opened:
+                return True, (
+                    f"Opened KDE shortcut editor.\n\n"
+                    f"Please add a new custom shortcut with these details:\n"
+                    f"- Command: {script_path}\n"
+                    f"- Name: Toggle {script_name}\n"
+                    f"- Shortcut: {shortcut} (suggested)\n\n"
+                    f"After creating the shortcut, click 'Apply' to save it."
+                )
+            else:
+                return False, (
+                    f"Could not open KDE shortcut editor. Please manually add a shortcut:\n"
+                    f"1. Open System Settings > Shortcuts > Custom Shortcuts\n"
+                    f"2. Add a new shortcut with command: {script_path}\n"
+                    f"3. Set the shortcut to: {shortcut} (suggested)"
+                )
 
         except Exception as e:
-            logger.error(f"Error setting shortcut for {script_name}: {e}")
-            return False, f"Error setting shortcut: {str(e)}"
+            logger.error(f"Error opening shortcut editor: {e}")
+            return False, f"Error opening shortcut editor: {str(e)}"
 
     def remove_shortcut(self, script_name: str) -> Tuple[bool, str]:
         """Remove a KWin keyboard shortcut for a toggle script.
@@ -133,49 +169,56 @@ class KWinManager:
         if not script_config:
             return False, f"Toggle script '{script_name}' not found"
 
-        # Create shortcut name
-        shortcut_name = f"Toggle {script_name}"
-        config_name = shortcut_name.replace(" ", "_").lower()
+        # Get current shortcut
+        current_shortcut = script_config.get("kwin_shortcut", "")
+        
+        # Remove the shortcut from script configuration
+        if "kwin_shortcut" in script_config:
+            del script_config["kwin_shortcut"]
+        self.config_manager.save_script(script_name, script_config)
 
+        # Open KDE's shortcut editor for manual removal
         try:
-            # Use kwriteconfig5 to disable the shortcut
-            kwrite_cmd = "kwriteconfig5"
-            if not self._is_command_available(kwrite_cmd):
-                kwrite_cmd = "kwriteconfig"
-
-            subprocess.run(
-                [kwrite_cmd, "--file", "khotkeysrc", "--group", f"Data_1_{config_name}", "--key", "Enabled", "false"])
-
-            # Try to use qdbus to remove shortcut as well
-            try:
-                bus = dbus.SessionBus()
-                kglobalaccel = bus.get_object("org.kde.kglobalaccel", "/kglobalaccel")
-                kglobalaccel_iface = dbus.Interface(kglobalaccel, "org.kde.KGlobalAccel")
-
-                component = "toggleman"
-                action_id = f"toggle_{script_name}"
-                key_sequence = []  # Empty sequence to clear
-                context = ""
-
-                kglobalaccel_iface.setShortcut(component, action_id, key_sequence, context, {})
-            except Exception:
-                pass  # Ignore errors, this is just a backup method
-
-            # Force reload of shortcuts
-            subprocess.run(["kquitapp5", "kglobalaccel"], check=False)
-            time.sleep(1)  # Wait for process to terminate
-            subprocess.run(["kglobalaccel5"], check=False)
-
-            # Update the script configuration
-            if "kwin_shortcut" in script_config:
-                del script_config["kwin_shortcut"]
-            self.config_manager.save_script(script_name, script_config)
-
-            return True, f"Removed shortcut for toggle script '{script_name}'"
+            # Try different methods to open the shortcut editor
+            opened = False
+            
+            # Method 1: Try KDE's Custom Shortcuts module
+            if "kcmshell" in self.kde_tools:
+                logger.debug(f"Opening custom shortcuts with {self.kde_tools['kcmshell']}")
+                try:
+                    subprocess.Popen([self.kde_tools["kcmshell"], "kcm_keys"])
+                    opened = True
+                except Exception as e:
+                    logger.warning(f"Error opening custom shortcuts with kcmshell: {e}")
+            
+            # Method 2: Try systemsettings
+            if not opened and "systemsettings" in self.kde_tools:
+                logger.debug(f"Opening system settings with {self.kde_tools['systemsettings']}")
+                try:
+                    if self.kde_tools["systemsettings"] == "systemsettings5":
+                        subprocess.Popen([self.kde_tools["systemsettings"], "keys"])
+                    else:
+                        subprocess.Popen([self.kde_tools["systemsettings"], "--section=shortcuts"])
+                    opened = True
+                except Exception as e:
+                    logger.warning(f"Error opening system settings: {e}")
+            
+            if opened:
+                return True, (
+                    f"Removed shortcut from configuration and opened KDE shortcut editor.\n\n"
+                    f"Please also remove the shortcut '{current_shortcut}' for 'Toggle {script_name}' "
+                    f"from the Custom Shortcuts section if it exists."
+                )
+            else:
+                return True, (
+                    f"Removed shortcut from configuration.\n\n"
+                    f"Please also manually remove the shortcut '{current_shortcut}' for 'Toggle {script_name}' "
+                    f"from System Settings > Shortcuts > Custom Shortcuts."
+                )
 
         except Exception as e:
-            logger.error(f"Error removing shortcut for {script_name}: {e}")
-            return False, f"Error removing shortcut: {str(e)}"
+            logger.error(f"Error opening shortcut editor: {e}")
+            return True, f"Removed shortcut from configuration, but error opening KDE shortcut editor: {str(e)}"
 
     def get_shortcuts(self) -> Dict[str, str]:
         """Get all KWin keyboard shortcuts set for toggle scripts.
@@ -215,113 +258,76 @@ class KWinManager:
             return False, "Window class not defined in script configuration"
 
         try:
-            # First check if kcmshell5 is available
-            if self._is_command_available("kcmshell5"):
-                # Launch KWin window rules with capture first
-                window_capture_cmd = ["kcmshell5", "kwinrules"]
-                capture_process = subprocess.Popen(window_capture_cmd)
-            else:
-                # Try the newer kcmshell6 on newer KDE versions
-                window_capture_cmd = ["kcmshell6", "kwinrules"]
-                capture_process = subprocess.Popen(window_capture_cmd)
-
-            # Wait a bit for the dialog to open
-            time.sleep(2)
-
-            # Alternative method: use systemsettings
-            if capture_process.poll() is not None:  # Process exited already
-                # Try using systemsettings
+            # Try different methods to open the window rules editor
+            opened = False
+            
+            # Method 1: Try kcmshell
+            if "kcmshell" in self.kde_tools:
+                logger.debug(f"Opening window rules with {self.kde_tools['kcmshell']}")
                 try:
-                    subprocess.Popen(["systemsettings5", "kcm_kwinrules"])
+                    subprocess.Popen([self.kde_tools["kcmshell"], "kwinrules"])
+                    opened = True
+                except Exception as e:
+                    logger.warning(f"Error opening window rules with kcmshell: {e}")
+            
+            # Method 2: Try systemsettings
+            if not opened and "systemsettings" in self.kde_tools:
+                logger.debug(f"Opening system settings with {self.kde_tools['systemsettings']}")
+                try:
+                    if self.kde_tools["systemsettings"] == "systemsettings5":
+                        subprocess.Popen([self.kde_tools["systemsettings"], "kcm_kwinrules"])
+                    else:
+                        subprocess.Popen([self.kde_tools["systemsettings"], "--section=windowmanagement", "--subsection=kwinrules"])
+                    opened = True
+                except Exception as e:
+                    logger.warning(f"Error opening system settings: {e}")
+            
+            # Method 3: Use xdg-open or kde-open to open the settings URL
+            if not opened and "opener" in self.kde_tools:
+                logger.debug(f"Opening window rules with {self.kde_tools['opener']}")
+                try:
+                    subprocess.Popen([self.kde_tools["opener"], "settings://kwinrules"])
+                    opened = True
+                except Exception as e:
+                    logger.warning(f"Error opening window rules with opener: {e}")
+            
+            if not opened:
+                # Last resort: Try a direct command
+                logger.debug("Trying direct command to open window rules")
+                try:
+                    subprocess.Popen(["kcmshell5", "kwinrules"])
+                    opened = True
                 except Exception:
-                    # Try newer systemsettings
                     try:
-                        subprocess.Popen(["systemsettings", "kcm_kwinrules"])
+                        subprocess.Popen(["kcmshell6", "kwinrules"])
+                        opened = True
                     except Exception as e:
-                        logger.error(f"Error launching system settings: {e}")
-
-            # Display a message to the user
-            return True, f"Opened window rules editor. Please create a rule for window class: {window_class}"
+                        logger.warning(f"Error opening window rules with direct command: {e}")
+            
+            if opened:
+                return True, (
+                    f"Opened KWin window rules editor.\n\n"
+                    f"Please create a rule for windows with class: '{window_class}'\n\n"
+                    f"Suggested settings:\n"
+                    f"- Window matching: Window class (exact match): {window_class}\n"
+                    f"- Position: Remember\n"
+                    f"- Size: Remember\n"
+                    f"- Minimized: Apply initially (if you want it to start minimized)\n"
+                    f"- Skip taskbar: Apply initially (optional)\n"
+                    f"- Skip pager: Apply initially (optional)\n\n"
+                    f"After creating the rule, click 'Apply' to save it."
+                )
+            else:
+                return False, (
+                    f"Could not open KWin window rules editor. Please manually add a window rule:\n"
+                    f"1. Open System Settings > Window Management > Window Rules\n"
+                    f"2. Add a new rule for windows with class: {window_class}\n"
+                    f"3. Configure the desired behavior (position, size, etc.)"
+                )
 
         except Exception as e:
-            logger.error(f"Error opening window rules for {script_name}: {e}")
-            return False, f"Error opening window rules: {str(e)}"
-
-    def _create_shortcut_with_kwriteconfig(self, shortcut_name: str, command: str, keys: str) -> None:
-        """Create a custom shortcut using kwriteconfig5.
-
-        Args:
-            shortcut_name: The name of the shortcut
-            command: The command to execute
-            keys: The shortcut key sequence
-        """
-        # Sanitize shortcut name for config
-        config_name = shortcut_name.replace(" ", "_").lower()
-
-        # Try to determine which kwriteconfig version to use
-        kwrite_cmd = "kwriteconfig5"
-        if not self._is_command_available(kwrite_cmd):
-            kwrite_cmd = "kwriteconfig"
-
-        # Find a unique index for this shortcut
-        try:
-            # Look for existing Data_X groups
-            result = subprocess.run(
-                ["grep", "-r", "Data_[0-9]", f"{os.path.expanduser('~')}/.config/khotkeysrc"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-
-            # Parse output to find the highest index
-            highest_index = 1
-            if result.returncode == 0:
-                import re
-                indices = re.findall(r'Data_(\d+)', result.stdout)
-                if indices:
-                    highest_index = max(map(int, indices)) + 1
-        except Exception:
-            highest_index = 1
-
-        data_group = f"Data_{highest_index}"
-        action_group = f"{data_group}_{config_name}"
-
-        # Use kwriteconfig to set shortcut
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", data_group, "--key", "Comment", "Toggleman Shortcuts"])
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", data_group, "--key", "Enabled", "true"])
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", data_group, "--key", "Name", "Toggleman Shortcuts"])
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", data_group, "--key", "Type", "GENERIC"])
-
-        # Create new group for the shortcut
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", action_group, "--key", "Comment", shortcut_name])
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", action_group, "--key", "Enabled", "true"])
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", action_group, "--key", "Name", shortcut_name])
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", action_group, "--key", "Type", "SIMPLE_ACTION_DATA"])
-
-        # Set the actual shortcut
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Actions", "--key", "ActionsCount", "1"])
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Actions0", "--key", "CommandURL", command])
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Actions0", "--key", "Type", "COMMAND_URL"])
-
-        # Set the trigger
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Triggers", "--key", "Comment", "Simple_action"])
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Triggers", "--key", "TriggersCount", "1"])
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Triggers0", "--key", "Key", keys])
-        subprocess.run([kwrite_cmd, "--file", "khotkeysrc", "--group", f"{action_group}Triggers0", "--key", "Type", "SHORTCUT"])
-
-        # Force reload of shortcuts
-        try:
-            subprocess.run(["kquitapp5", "kglobalaccel"], check=False)
-            time.sleep(1)  # Wait for process to terminate
-            subprocess.run(["kglobalaccel5"], check=False)
-        except Exception:
-            # Try alternate methods
-            try:
-                subprocess.run(["killall", "kglobalaccel5"], check=False)
-                time.sleep(1)
-                subprocess.run(["kglobalaccel5"], check=False)
-            except Exception:
-                pass
+            logger.error(f"Error opening window rules editor: {e}")
+            return False, f"Error opening window rules editor: {str(e)}"
 
     def _is_command_available(self, command: str) -> bool:
         """Check if a command is available in the PATH.
@@ -333,7 +339,14 @@ class KWinManager:
             True if the command is available, False otherwise
         """
         try:
-            subprocess.run(["which", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            return True
+            # Use subprocess.run instead of which for better compatibility
+            result = subprocess.run(
+                ["which", command], 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
+            return result.returncode == 0
         except Exception:
             return False

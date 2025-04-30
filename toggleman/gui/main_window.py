@@ -727,11 +727,16 @@ class MainWindow(QMainWindow):
             # Reload scripts
             self._load_scripts()
 
-            # Show success message
-            self.status_bar.showMessage(f"Set shortcut '{shortcut}' for toggle script '{script_name}'")
+            # Show information message
+            QMessageBox.information(
+                self,
+                "Set Shortcut",
+                message
+            )
         else:
             # Show error message
             QMessageBox.critical(self, "Error", f"Failed to set shortcut: {message}")
+
 
     def _on_set_window_rule(self):
         """Handle setting a window rule for a toggle script."""
@@ -745,8 +750,12 @@ class MainWindow(QMainWindow):
         success, message = self.kwin_manager.open_window_rules(script_name)
 
         if success:
-            # Show success message
-            self.status_bar.showMessage(message)
+            # Show information message
+            QMessageBox.information(
+                self,
+                "Set Window Rule",
+                message
+            )
         else:
             # Show error message
             QMessageBox.critical(self, "Error", f"Failed to open window rules: {message}")
@@ -842,7 +851,7 @@ class MainWindow(QMainWindow):
             return
 
         # Open log file viewer
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
+        #from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QPushButton
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Log Viewer")
